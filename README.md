@@ -2,7 +2,9 @@
 TCJA Financial Complexity and Time Use
 Project Overview
 This repository contains the data construction and empirical analysis code for the paper:
-> **“Causal Effects of Financial Complexity Shocks on Time Use and Emotional Well-Being: Evidence from Tax Policy Changes (TCJA 2017)”**
+> **“Did Tax Simplification Reduce Household
+Financial Management Burden? Evidence
+from the Tax Cuts and Jobs Act”**
 The project studies how the reduction in tax filing complexity induced by the 2017 U.S. Tax Cuts and Jobs Act (TCJA) affected:
 Time spent on financial activities
 Household production and labor allocation
@@ -262,10 +264,9 @@ and no simultaneous differential shocks aside from TCJA.
 ---
 Suggested Citation
 ```text
-[Author names]
-
-"Causal Effects of Financial Complexity Shocks on Time Use and Emotional Well-Being:
-Evidence from Tax Policy Changes (TCJA 2017)"
+Giménez-Nadal,J.I., and J.A. Molina. "Did Tax Simplification Reduce Household
+Financial Management Burden? Evidence
+from the Tax Cuts and Jobs Act"
 ```
 ---
 Contact
