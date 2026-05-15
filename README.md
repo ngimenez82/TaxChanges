@@ -17,13 +17,7 @@ through a Difference-in-Differences (DiD) design.
 ---
 Repository Structure
 ```text
-├── Data/
-│   ├── ATUS_Clean.dta
-│   ├── TCJA_State_Data_DiD.xlsx
-│   ├── TCJA_State_Treatment.dta
-│   ├── TCJA_Financial_Time.dta
-│   └── TCJA_Financial_WellBeing.dta
-│
+
 ├── Dofiles/
 │   ├── Sample_Creation_TCJA.do
 │   └── Analysis_DiD_TCJA.do
