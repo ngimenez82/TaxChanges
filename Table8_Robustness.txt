@@ -1,0 +1,92 @@
+	(1)	(2)	(3)	(4)
+VARIABLES	(R1) Placebo Reform 2015	(R2) Excl. famincome=16	(R3) No-Tax State Control	(R5) Log(Financial+1)
+				
+did_ind		-0.042	-0.134	-0.005
+		(0.471)	(0.575)	(0.023)
+treatment_ind	1.997	2.788***	3.197***	0.180***
+	(1.536)	(0.916)	(0.941)	(0.037)
+post_tcja		-0.565	-0.427	-0.053*
+		(0.831)	(0.776)	(0.028)
+male				-0.160***
+				(0.015)
+age				0.006***
+				(0.002)
+age_2				-0.002
+				(0.002)
+full_time				-0.173***
+				(0.015)
+male_full_time				0.016
+				(0.021)
+educ_2				0.095***
+				(0.021)
+educ_3				0.260***
+				(0.021)
+hispanic				-0.096***
+				(0.020)
+married				0.017
+				(0.014)
+white				0.211*
+				(0.111)
+black				0.060
+				(0.117)
+indian				0.131
+				(0.113)
+asian				-0.041
+				(0.103)
+pacific				-0.010
+				(0.108)
+other_races				0.253**
+				(0.111)
+retired				0.082***
+				(0.029)
+hh_size				-0.021**
+				(0.008)
+hh_numkids				0.038***
+				(0.009)
+ageychild				0.000
+				(0.002)
+2.famincome				-0.068
+				(0.048)
+3.famincome				-0.023
+				(0.040)
+4.famincome				-0.070*
+				(0.041)
+5.famincome				-0.061
+				(0.044)
+6.famincome				-0.019
+				(0.046)
+7.famincome				0.032
+				(0.042)
+8.famincome				0.071*
+				(0.041)
+9.famincome				0.081**
+				(0.036)
+10.famincome				0.075*
+				(0.042)
+11.famincome				0.097**
+				(0.037)
+12.famincome				-0.070***
+				(0.024)
+13.famincome				-0.039**
+				(0.017)
+15.famincome				0.164***
+				(0.034)
+16.famincome				0.192***
+				(0.042)
+did_fake	-0.527			
+	(0.761)			
+post_fake	-0.451			
+	(0.683)			
+no_income_tax			0.311	
+			(0.221)	
+c.did_ind#c.no_income_tax			-1.708**	
+			(0.772)	
+Constant	3.224	-2.769	-3.843*	-0.055
+	(3.977)	(2.201)	(2.066)	(0.115)
+				
+Observations	44,818	76,983	87,779	87,779
+R-squared	0.022	0.019	0.019	0.032
+Note	Placebo: fake reform year = 2015	Excludes famincome=16 from sample	Interacts DiD with no-income-tax state indicator	
+Outcome				log(financial + 1)
+Robust standard errors in parentheses				
+*** p<0.01, ** p<0.05, * p<0.1				

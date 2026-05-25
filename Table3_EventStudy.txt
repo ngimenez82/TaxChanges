@@ -1,0 +1,28 @@
+	(1)
+VARIABLES	Event Study
+	
+treat_yr_2013	0.526
+	(1.142)
+treat_yr_2014	0.939
+	(0.794)
+treat_yr_2015	-0.833
+	(1.017)
+treat_yr_2016	0.647
+	(1.191)
+treat_yr_2018	-0.171
+	(1.397)
+treat_yr_2019	-0.699
+	(0.970)
+treat_yr_2021	1.752
+	(2.039)
+treat_yr_2022	-0.622
+	(1.057)
+treat_yr_2023	0.086
+	(0.980)
+Constant	-3.938*
+	(2.065)
+	
+Observations	87,779
+R-squared	0.019
+Robust standard errors in parentheses	
+*** p<0.01, ** p<0.05, * p<0.1	
