@@ -15,20 +15,7 @@ Income groups (households likely vs unlikely to itemize deductions)
 States (variation in pre-TCJA itemization intensity)
 through a Difference-in-Differences (DiD) design.
 ---
-Repository Structure
-```text
 
-├── Dofiles/
-│   ├── Sample_Creation_TCJA.do
-│   └── Analysis_DiD_TCJA.do
-│
-├── Results/
-│   ├── Table2_Main_DiD.xls
-│   ├── Figures/
-│   └── Logs/
-│
-└── README.md
-```
 ---
 Data Sources
 1. American Time Use Survey (ATUS)
