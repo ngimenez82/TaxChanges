@@ -22,15 +22,37 @@
 *    - 2020 omitted from event-study interactions (COVID confound)
 *
 *  STRUCTURE:
-*    Part I   - Table 1: Summary statistics
-*    Part II  - Table 2: Main DiD (H1: time in financial activities)
-*    Part III - Table 3: Event study / parallel trends test (Figure 1)
-*    Part IV  - Table 4: DiD by gender (H3) (Figure 2a, 2b)
-*    Part V   - Table 5: Well-being DiD (H2)
-*    Part VI  - Table 6: Heterogeneity by education, SALT exposure, gender
-*    Part VII - Table 7: Continuous DiD (state treatment intensity)
-*    Part VIII- Table 8: Robustness checks
-*    Part IX  - Figures (Figure 3 trends, Figure 4 by gender)
+*    Part I     - Table 1: Summary statistics
+*    Part II    - Table 2: Main DiD (H1: time in financial activities)
+*    Part III   - Table 3: Event study / parallel trends test (Figure 1)
+*    Part III-B - Table 9: Tax-season triple-diff  [NEW]
+*    Part IV    - Table 4: DiD by gender (H3) (Figure 2a, 2b)
+*    Part IV-B  - Table 10: Event studies for college+ and high-SALT subgroups [NEW]
+*    Part V     - Table 5: Well-being DiD (H2)
+*    Part VI    - Table 6: Heterogeneity by education, SALT exposure, gender
+*    Part VII   - Table 7: Continuous DiD (state treatment intensity)
+*    Part VIII  - Table 8: Robustness checks
+*    Part VIII-B- Magnitude plausibility check & minimum detectable effect [NEW]
+*    Part IX    - Figures (Figure 3 trends, Figure 4 by gender)
+*
+*  REVISION HISTORY (response to JEBO reviewer comments, Aug 2026):
+*    - NEW Table2 cols (7)-(8): narrow tax/insurance outcome (Rev#2), and
+*      pre-COVID-only post period 2013-2019 (Rev#1 pt.1b).
+*    - NEW Part III-B / Table9: treatment x post x tax_season triple-diff,
+*      on both the broad and narrow outcomes (Rev#1 pt.3, Rev#2 "tax
+*      season" comment). Requires tax_season / did_x_season etc. from the
+*      updated Sample_Creation_TCJA.do.
+*    - NEW Part IV-B / Table10 + Figures 5-6: event studies + joint
+*      pre-trend tests for the college-educated and high-SALT subgroups
+*      (Rev#2: "we need to see parallel trends tests for the heterogeneous
+*      effects that look significant").
+*    - NEW Part VIII-B: minimum detectable effect (Rev#2 "statistical
+*      power") and a data-driven implied-ATT/switcher magnitude check
+*      against the IRS Tax Burden Survey benchmark (Rev#1 pt.4).
+*    - See Sample_Creation_TCJA.do STEP 3 for a diagnostic block on the
+*      "transition zone" sample-consistency issue (Rev#2 minor comment) -
+*      resolve that BEFORE trusting Table 2 columns (1)-(2)/(4)-(6) here,
+*      since they currently do NOT restrict to `in_did_sample==1`.
 *
 *  AUTHOR: [Your name]
 *  LAST UPDATED: 2026
@@ -60,7 +82,7 @@ use "Data/TCJA_Financial_Time.dta", clear
 
 
 di "--- Panel A: Time use (minutes/day) ---"
-sum financial personal_care housework childcare adult_care market_work study leisure  [aw = wt06]
+sum financial tax personal_care housework childcare adult_care market_work study leisure  [aw = wt06]
 
 di "--- Panel B: Demographics ---"
 sum male age full_time educ_1 educ_2 educ_3 hispanic married ///
@@ -82,27 +104,45 @@ bysort post_tcja treatment_ind: sum financial [aw = wt06]
 
 use "Data/TCJA_Financial_Time.dta", clear
 
+*--- IMPORTANT [confirmed by the Sample_Creation_TCJA.do STEP 3 diagnostic] ---
+*   Columns (1),(2),(4),(5),(6) below do NOT restrict the sample to
+*   treatment_ind==1 | control_group==1. Since STEP 2 only drops
+*   famincome>16 (not the $35-50k transition zone or the $100k+ group),
+*   "post_tcja"/"did_ind" in those columns are estimated against a
+*   contaminated comparison group = control_group (famincome<=9, N=27,129)
+*   PLUS the $35-50k transition zone (N=11,553) PLUS the $100k+ group
+*   (N=22,272) - i.e. against everyone NOT in the $50-100k bracket, not
+*   against the "rarely itemize" <$35k group the paper's text describes.
+*   This is very likely the exact source of the Table 1 vs Table 3 N
+*   mismatch Reviewer #2 flagged (87,779 vs 53,954): 53,954 = 26,825
+*   (treated) + 27,129 (true control) is the CORRECT clean comparison, and
+*   it is already what column (3) below computes. Column (3), NOT column
+*   (2), is the specification consistent with the paper's stated design -
+*   treat column (2) as a robustness check against a broader comparison
+*   group, not as the preferred estimate, when revising the text.
 
-*--- Column 1: Simple DiD, no controls ---
+*--- Column 1: Simple DiD, no controls [vs ALL non-treated - see note above] ---
 reg financial did_ind treatment_ind post_tcja i.year i.statefip ///
     [pw = wt06], robust cluster(statefip)
 outreg2 using "Results/Table2_Main_DiD.xls", ///
     ctitle("(1) Simple DiD") ///
     keep(did_ind treatment_ind post_tcja) ///
-    addtext("Controls","No","State FE","Yes","Year FE","Yes") ///
+    addtext("Controls","No","State FE","Yes","Year FE","Yes","Comparison","vs ALL non-treated (NOT clean control)") ///
     bdec(3) se replace
 
-*--- Column 2: With demographics ---
+*--- Column 2: With demographics [vs ALL non-treated - see note above] ---
 reg financial did_ind treatment_ind post_tcja $controls ///
     i.year i.statefip [pw = wt06], robust cluster(statefip)
 outreg2 using "Results/Table2_Main_DiD.xls", ///
     ctitle("(2) With Controls") ///
     keep(did_ind treatment_ind post_tcja $controls) ///
-    addtext("Controls","Yes","State FE","Yes","Year FE","Yes") ///
+    addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Comparison","vs ALL non-treated (NOT clean control)") ///
     bdec(3) se append
 
 *--- Column 3: Treatment = $50k-$100k vs. control = <$35k ---
-*   (restrict to these two groups for clean comparison)
+*   PREFERRED SPECIFICATION - the only column that restricts to the two
+*   groups the paper's identification strategy actually describes
+*   (excludes $35-50k transition zone AND $100k+ high income).
 preserve
 keep if treatment_ind == 1 | control_group == 1
 reg financial did_ind treatment_ind post_tcja $controls ///
@@ -110,7 +150,7 @@ reg financial did_ind treatment_ind post_tcja $controls ///
 outreg2 using "Results/Table2_Main_DiD.xls", ///
     ctitle("(3) Clean Comparison") ///
     keep(did_ind treatment_ind post_tcja $controls) ///
-    addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Sample","50-100k vs <35k") ///
+    addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Sample","50-100k vs <35k","Comparison","PREFERRED: clean treat vs true control") ///
     bdec(3) se append
 restore
 
@@ -141,6 +181,51 @@ outreg2 using "Results/Table2_Main_DiD.xls", ///
     ctitle("(6) Excl. 2020") ///
     keep(did_ind treatment_ind post_tcja $controls) ///
     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Note","2020 excluded") ///
+    bdec(3) se append
+restore
+
+*--- Column 7 [NEW]: Narrow outcome - tax/insurance time only ---
+*   Reviewer #2: higher-powered test using only the activity codes that
+*   plausibly respond to the standard-deduction change (tax prep/filing +
+*   insurance), instead of all financial management. Same sample/spec as
+*   column (2).
+reg tax did_ind treatment_ind post_tcja $controls ///
+    i.year i.statefip [pw = wt06], robust cluster(statefip)
+outreg2 using "Results/Table2_Main_DiD.xls", ///
+    ctitle("(7) Narrow: Tax Time") ///
+    keep(did_ind treatment_ind post_tcja $controls) ///
+    addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Outcome","Tax/insurance minutes only") ///
+    bdec(3) se append
+
+*--- Column 8 [NEW]: Pre-COVID post period only (2013-2019) ---
+*   Reviewer #1 pt.1b: the post-period overlaps COVID; excluding 2020 alone
+*   (column 6) still leaves 2021-2023 (pandemic-adjacent recovery years) in
+*   the post period. This restricts to a "clean" pre-COVID post window.
+preserve
+keep if year <= 2019
+reg financial did_ind treatment_ind post_tcja $controls ///
+    i.year i.statefip [pw = wt06], robust cluster(statefip)
+outreg2 using "Results/Table2_Main_DiD.xls", ///
+    ctitle("(8) Pre-COVID Post Only") ///
+    keep(did_ind treatment_ind post_tcja $controls) ///
+    addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Sample","2013-2019 only") ///
+    bdec(3) se append
+restore
+
+*--- Column 9 [NEW]: Narrow outcome (tax) x clean comparison sample ---
+*   Combines Reviewer #2's narrow-outcome suggestion (col 7) with the
+*   correct treat-vs-true-control sample restriction (col 3) - this is
+*   the specification the paper should probably lead with going forward,
+*   since it addresses both the identification concern AND the power
+*   concern in one shot.
+preserve
+keep if treatment_ind == 1 | control_group == 1
+reg tax did_ind treatment_ind post_tcja $controls ///
+    i.year i.statefip [pw = wt06], robust cluster(statefip)
+outreg2 using "Results/Table2_Main_DiD.xls", ///
+    ctitle("(9) Narrow Tax x Clean Sample") ///
+    keep(did_ind treatment_ind post_tcja $controls) ///
+    addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Sample","50-100k vs <35k","Outcome","Tax/insurance minutes only","Comparison","PREFERRED sample + narrow outcome") ///
     bdec(3) se append
 restore
 
@@ -213,6 +298,110 @@ coefplot, ///
     graphregion(color(white) margin(medium)) plotregion(margin(medium)) ///
     scheme(s2color)
 graph export "Results/Figure1_EventStudy.png", replace width(2400)
+
+
+********************************************************************************
+** PART III-B [NEW] - TAX SEASON TRIPLE-DIFF (Table 9)
+********************************************************************************
+**  Reviewer #1 (pt.3) and Reviewer #2 both suggest exploiting within-year
+**  timing: the standard-deduction change should only plausibly affect time
+**  use during the filing season (~Jan-Apr), not the full calendar year.
+**  This estimates treatment x post x tax_season, on both the broad outcome
+**  (financial) and the narrow outcome (tax), so the paper can report
+**  whether the effect concentrates where the mechanism predicts it should.
+**  Requires tax_season / treat_x_season / post_x_season / did_x_season
+**  from the updated Sample_Creation_TCJA.do (STEP 3) - re-run that script
+**  first if these variables are missing.
+********************************************************************************
+
+use "Data/TCJA_Financial_Time.dta", clear
+
+capture confirm variable did_x_season
+if _rc != 0 {
+    di as error "ERROR: did_x_season not found - re-run the updated"
+    di as error "Sample_Creation_TCJA.do (STEP 3) before this section."
+    exit 111
+}
+
+*--- (1) Broad outcome (all financial management), triple-diff ---
+reg financial did_ind did_x_season treatment_ind post_tcja tax_season ///
+    treat_x_season post_x_season $controls i.year i.statefip ///
+    [pw = wt06], robust cluster(statefip)
+di ""
+di "--- Broad outcome: total effect DURING tax season (did_ind + did_x_season) ---"
+lincom did_ind + did_x_season
+outreg2 using "Results/Table9_TaxSeason_TripleDiD.xls", ///
+    ctitle("(1) Broad Outcome") ///
+    keep(did_ind did_x_season treatment_ind post_tcja tax_season ///
+         treat_x_season post_x_season $controls) ///
+    addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Outcome","All financial mgmt") ///
+    bdec(3) se replace
+
+*--- (2) Narrow outcome (tax/insurance time only), triple-diff ---
+*   Sharpest test: if the mechanism is filing-driven, this effect should be
+*   concentrated almost entirely in did_x_season, with did_ind near zero.
+reg tax did_ind did_x_season treatment_ind post_tcja tax_season ///
+    treat_x_season post_x_season $controls i.year i.statefip ///
+    [pw = wt06], robust cluster(statefip)
+di ""
+di "--- Narrow (tax) outcome: total effect DURING tax season (did_ind + did_x_season) ---"
+lincom did_ind + did_x_season
+outreg2 using "Results/Table9_TaxSeason_TripleDiD.xls", ///
+    ctitle("(2) Narrow: Tax Time") ///
+    keep(did_ind did_x_season treatment_ind post_tcja tax_season ///
+         treat_x_season post_x_season $controls) ///
+    addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Outcome","Tax/insurance minutes only") ///
+    bdec(3) se append
+
+*--- (3) [NEW] Broad outcome, restricted to the CLEAN comparison sample ---
+*   Columns (1)-(2) above run on the full famincome 1-16 range, so
+*   treat_x_season/did_x_season are picking up "treated vs everyone else"
+*   (transition zone + high income included), same contamination issue as
+*   Table 2 columns (1)-(2) - see the note at the top of Part II. This
+*   column restricts to treatment_ind==1 | control_group==1 so the
+*   tax-season test is run on the sample the paper's design actually
+*   describes. Compare directly to Table 2 column (3).
+preserve
+keep if treatment_ind == 1 | control_group == 1
+reg financial did_ind did_x_season treatment_ind post_tcja tax_season ///
+    treat_x_season post_x_season $controls i.year i.statefip ///
+    [pw = wt06], robust cluster(statefip)
+di ""
+di "--- CLEAN SAMPLE, broad outcome: total effect DURING tax season ---"
+lincom did_ind + did_x_season
+outreg2 using "Results/Table9_TaxSeason_TripleDiD.xls", ///
+    ctitle("(3) Broad, Clean Sample") ///
+    keep(did_ind did_x_season treatment_ind post_tcja tax_season ///
+         treat_x_season post_x_season $controls) ///
+    addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Outcome","All financial mgmt","Sample","PREFERRED: 50-100k vs <35k") ///
+    bdec(3) se append
+restore
+
+*--- (4) [NEW] Narrow outcome, restricted to the CLEAN comparison sample ---
+*   The sharpest available test: narrow outcome + correct comparison group.
+preserve
+keep if treatment_ind == 1 | control_group == 1
+reg tax did_ind did_x_season treatment_ind post_tcja tax_season ///
+    treat_x_season post_x_season $controls i.year i.statefip ///
+    [pw = wt06], robust cluster(statefip)
+di ""
+di "--- CLEAN SAMPLE, narrow (tax) outcome: total effect DURING tax season ---"
+lincom did_ind + did_x_season
+outreg2 using "Results/Table9_TaxSeason_TripleDiD.xls", ///
+    ctitle("(4) Narrow, Clean Sample") ///
+    keep(did_ind did_x_season treatment_ind post_tcja tax_season ///
+         treat_x_season post_x_season $controls) ///
+    addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Outcome","Tax/insurance minutes only","Sample","PREFERRED: 50-100k vs <35k") ///
+    bdec(3) se append
+restore
+
+di ""
+di "--- Interpretation guide for Table 9 ---"
+di "  did_ind      = effect OUTSIDE tax season (expect ~0 if mechanism is filing-driven)"
+di "  did_x_season = ADDITIONAL effect DURING tax season (key coefficient)"
+di "  did_ind + did_x_season (see lincom above) = total effect DURING tax season"
+di "  Columns (3)-(4) are on the PREFERRED clean sample - read those over (1)-(2)."
+di ""
 
 
 ********************************************************************************
@@ -306,6 +495,99 @@ foreach g in 0 1 {
     graph export "Results/Figure2_EventStudy_`lbl'.png", replace width(2400)
     restore
 }
+
+
+********************************************************************************
+** PART IV-B [NEW] - EVENT STUDIES FOR SIGNIFICANT SUBGROUPS (Table 10)
+********************************************************************************
+**  Reviewer #2: "We need to see parallel trends tests for the
+**  heterogeneous effects that look significant (e.g. college educated
+**  individuals in Table 6)." This mirrors the gender event-study loop
+**  above (Part IV) for the college-educated and high-SALT subgroups,
+**  where Table 6 reports significant DiD coefficients, WITH their own
+**  joint pre-trend test - without this, a "significant" subgroup result
+**  could simply be riding a pre-existing subgroup-specific trend.
+********************************************************************************
+
+use "Data/TCJA_Financial_Time.dta", clear
+
+*--- College-educated only ---
+preserve
+keep if educ_3 == 1
+levelsof year, local(years)
+foreach yr of local years {
+    generate treat_yr_`yr' = treatment_ind * (year == `yr')
+}
+drop treat_yr_2017
+capture drop treat_yr_2020
+reg financial treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016 ///
+    treat_yr_2018 treat_yr_2019 treat_yr_2021 treat_yr_2022 treat_yr_2023 ///
+    treatment_ind post_tcja $controls_noinc i.year i.statefip ///
+    [pw = wt06], robust cluster(statefip)
+test treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016
+di "Joint pre-trend test, COLLEGE-EDUCATED subgroup (p-value above; want p > 0.10)"
+outreg2 using "Results/Table10_Subgroup_EventStudy.xls", ///
+    ctitle("College+ : Event Study") ///
+    keep(treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016 ///
+         treat_yr_2018 treat_yr_2019 treat_yr_2021 treat_yr_2022 treat_yr_2023) ///
+    addtext("Subgroup","College-educated") bdec(3) se replace
+coefplot, ///
+    keep(treat_yr_*) vertical ///
+    rename(treat_yr_2013 = "2013" treat_yr_2014 = "2014" treat_yr_2015 = "2015" ///
+           treat_yr_2016 = "2016" treat_yr_2018 = "2018" treat_yr_2019 = "2019" ///
+           treat_yr_2021 = "2021" treat_yr_2022 = "2022" treat_yr_2023 = "2023") ///
+    ciopts(recast(rcap) lcolor(gs8) lwidth(medium)) ///
+    mcolor("26 71 111") msymbol(O) msize(medlarge) ///
+    yline(0, lpattern(solid) lcolor(black) lwidth(thin)) ///
+    xline(4.5, lpattern(dash) lcolor(cranberry) lwidth(medthick)) ///
+    title("Event Study: College-Educated Subgroup", size(medium)) ///
+    subtitle("Treatment x Year coefficients (reference year: 2017)", size(small)) ///
+    ytitle("Treatment x Year coefficient (minutes/day)", size(small)) ///
+    xtitle("Year", size(small)) ///
+    ylabel(, angle(0) format(%5.1f)) xlabel(, angle(45)) legend(off) ///
+    note("Sample: College-educated only. Reference year: 2017. 2020 omitted (COVID-19).", size(vsmall)) ///
+    graphregion(color(white) margin(medium)) plotregion(margin(medium)) scheme(s2color)
+graph export "Results/Figure5_EventStudy_CollegePlus.png", replace width(2400)
+restore
+
+*--- High-SALT states only ---
+preserve
+keep if high_salt_state == 1
+levelsof year, local(years)
+foreach yr of local years {
+    generate treat_yr_`yr' = treatment_ind * (year == `yr')
+}
+drop treat_yr_2017
+capture drop treat_yr_2020
+reg financial treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016 ///
+    treat_yr_2018 treat_yr_2019 treat_yr_2021 treat_yr_2022 treat_yr_2023 ///
+    treatment_ind post_tcja $controls i.year i.statefip ///
+    [pw = wt06], robust cluster(statefip)
+test treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016
+di "Joint pre-trend test, HIGH-SALT STATES subgroup (p-value above; want p > 0.10)"
+outreg2 using "Results/Table10_Subgroup_EventStudy.xls", ///
+    ctitle("High-SALT : Event Study") ///
+    keep(treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016 ///
+         treat_yr_2018 treat_yr_2019 treat_yr_2021 treat_yr_2022 treat_yr_2023) ///
+    addtext("Subgroup","High-SALT states") bdec(3) se append
+coefplot, ///
+    keep(treat_yr_*) vertical ///
+    rename(treat_yr_2013 = "2013" treat_yr_2014 = "2014" treat_yr_2015 = "2015" ///
+           treat_yr_2016 = "2016" treat_yr_2018 = "2018" treat_yr_2019 = "2019" ///
+           treat_yr_2021 = "2021" treat_yr_2022 = "2022" treat_yr_2023 = "2023") ///
+    ciopts(recast(rcap) lcolor(gs8) lwidth(medium)) ///
+    mcolor("26 71 111") msymbol(O) msize(medlarge) ///
+    yline(0, lpattern(solid) lcolor(black) lwidth(thin)) ///
+    xline(4.5, lpattern(dash) lcolor(cranberry) lwidth(medthick)) ///
+    title("Event Study: High-SALT States Subgroup", size(medium)) ///
+    subtitle("Treatment x Year coefficients (reference year: 2017)", size(small)) ///
+    ytitle("Treatment x Year coefficient (minutes/day)", size(small)) ///
+    xtitle("Year", size(small)) ///
+    ylabel(, angle(0) format(%5.1f)) xlabel(, angle(45)) legend(off) ///
+    note("Sample: High-SALT states only (top quintile pre-TCJA itemization). Reference year: 2017. 2020 omitted.", size(vsmall)) ///
+    graphregion(color(white) margin(medium)) plotregion(margin(medium)) scheme(s2color)
+graph export "Results/Figure6_EventStudy_HighSALT.png", replace width(2400)
+restore
 
 
 
@@ -544,6 +826,111 @@ outreg2 using "Results/Table8_Robustness.xls", ///
 
 
 ********************************************************************************
+** PART VIII-B [NEW] - MAGNITUDE PLAUSIBILITY CHECK & MINIMUM DETECTABLE EFFECT
+********************************************************************************
+**  Reviewer #1 (pt.4): asks the authors to confront the magnitude of the
+**  estimates against outside benchmarks (IRS Tax Burden Survey ~13h/year).
+**  Reviewer #2: asks for an explicit statistical-power discussion instead
+**  of calling the null "precise" based only on % of the control mean.
+**  This block computes both diagnostics from the data actually used in the
+**  regressions, rather than the reviewer's own back-of-envelope numbers.
+********************************************************************************
+
+use "Data/TCJA_Financial_Time.dta", clear
+
+*--- (a) Minimum detectable effect (MDE), main DiD, 80% power / 5% size ---
+*   Standard formula: MDE = (z_{alpha/2} + z_{power}) * SE(beta)
+qui reg financial did_ind treatment_ind post_tcja $controls ///
+    i.year i.statefip [pw = wt06], robust cluster(statefip)
+local se_did = _se[did_ind]
+local mde = (1.96 + 0.84) * `se_did'
+qui sum financial [aw = wt06] if control_group == 1 & post_tcja == 0
+local premean = r(mean)
+di ""
+di "=================================================================="
+di "  MINIMUM DETECTABLE EFFECT - main DiD (80% power, 5% size)"
+di "=================================================================="
+di "  SE(did_ind)                          = " %6.3f `se_did' " min/day"
+di "  MDE                                  = " %6.3f `mde' " min/day"
+di "  Pre-period control-group mean        = " %6.3f `premean' " min/day"
+di "  MDE as % of pre-period control mean  = " %5.1f (`mde'/`premean')*100 "%"
+di "  --> report this alongside the point estimate instead of relying on"
+di "      '% of control mean' alone to argue the null is 'precise' (Rev#2)."
+di "=================================================================="
+di ""
+
+*--- (b) Implied ATT on switchers, college-educated subgroup ---
+*   Attempts a data-driven itemization-decline gap using delta_1718 (state
+*   pp change in itemization 2017->2018, computed in Sample_Creation_TCJA.do
+*   STEP 4), then falls back to Reviewer #1's own ~30pp assumption
+*   (from Tax Foundation 2019 figures) if the state-level proxy turns out
+*   to be too close to zero to use as a denominator. delta_1718 is a
+*   STATE-level average across ALL income brackets, so unless treated and
+*   control households are concentrated in very different states, it will
+*   NOT differ much between the two groups by construction - it is not a
+*   good proxy for the income-specific itemization decline this
+*   calculation needs. A MIN_GAP safety threshold prevents a
+*   near-zero-denominator blow-up (this happened in an earlier run: a
+*   0.0pp gap produced a nonsensical -38,433 min/day implied ATT).
+local MIN_GAP = 1  // pp; below this, treat the state-level proxy as uninformative
+
+qui sum delta_1718 [aw = wt06] if treatment_ind == 1
+local switch_treated = abs(r(mean))
+qui sum delta_1718 [aw = wt06] if control_group == 1
+local switch_control = abs(r(mean))
+local switch_gap = `switch_treated' - `switch_control'
+
+qui reg financial did_ind treatment_ind post_tcja $controls_noinc ///
+    i.year i.statefip if educ_3 == 1 [pw = wt06], robust cluster(statefip)
+local beta_college = _b[did_ind]
+
+di "=================================================================="
+di "  MAGNITUDE PLAUSIBILITY CHECK - college-educated subgroup"
+di "=================================================================="
+di "  Mean |delta_1718| (pp itemization decline), treated group  = " %5.2f `switch_treated'
+di "  Mean |delta_1718| (pp itemization decline), control group  = " %5.2f `switch_control'
+di "  Implied itemization-decline GAP (treated - control), pp    = " %5.2f `switch_gap'
+di "  ITT coefficient, college-educated (did_ind)                = " %6.3f `beta_college' " min/day"
+if `switch_gap' > `MIN_GAP' {
+    local att_college = `beta_college' / (`switch_gap'/100)
+    local hrs_college = `att_college' * 365 / 60
+    di "  Implied ATT on switchers (state-level proxy)                = " %7.1f `att_college' " min/day"
+    di "  ... equivalent to                                            = " %6.1f `hrs_college' " hours/year"
+    di "  BENCHMARK: IRS Tax Burden Survey ~= 13 hours/year for the"
+    di "  average filer's ENTIRE return (Reviewer #1, point 4)."
+    if abs(`hrs_college') > 13 {
+        di "  FLAG: implied ATT exceeds the total-filing-time benchmark -"
+        di "  discuss explicitly in the paper (compositional story, measurement"
+        di "  error, or genuine outlier subgroup) rather than leaving it implicit."
+    }
+}
+else {
+    di "  NOTE: the state-level delta_1718 gap (" %4.2f `switch_gap' "pp) is below the"
+    di "  " %2.0f `MIN_GAP' "pp threshold - as expected, since delta_1718 is a STATE"
+    di "  average across ALL income brackets and cannot meaningfully separate"
+    di "  treated vs control households within the same state. Do NOT use it"
+    di "  to defend the college+ magnitude. Falling back to Reviewer #1's own"
+    di "  ~30pp assumption (Tax Foundation 2019) for a sensitivity calculation:"
+    local att_college_fallback = `beta_college' / 0.30
+    local hrs_college_fallback = `att_college_fallback' * 365 / 60
+    di "  Implied ATT using an assumed 30pp gap                       = " %7.1f `att_college_fallback' " min/day"
+    di "  ... equivalent to                                            = " %6.1f `hrs_college_fallback' " hours/year"
+    di "  BENCHMARK: IRS Tax Burden Survey ~= 13 hours/year for the average filer."
+    if abs(`hrs_college_fallback') > 13 {
+        di "  FLAG: even under the 30pp assumption, implied ATT exceeds the"
+        di "  13h/year benchmark - discuss explicitly in the paper rather than"
+        di "  leaving it implicit (this is Reviewer #1's own point-4 finding,"
+        di "  confirmed on this data)."
+    }
+    di "  For a real (non-fallback) number, compute the itemization-decline"
+    di "  gap from IRS SOI Historic Table 2 BY INCOME BRACKET (not by state) -"
+    di "  the state-level file merged here cannot answer this question."
+}
+di "=================================================================="
+di ""
+
+
+********************************************************************************
 ** PART IX - FIGURES
 ********************************************************************************
 
@@ -623,19 +1010,28 @@ di "=================================================================="
 di "  All results exported to Results/ subdirectory."
 di ""
 di "  Key tables:"
-di "    Table2_Main_DiD.xls       - Main DiD estimates (H1)"
-di "    Table3_EventStudy.xls     - Parallel trends test (-5/+5 window)"
-di "    Table4_Gender.xls         - Gender heterogeneity (H3)"
-di "    Table5_WellBeing.xls      - Well-being outcomes (H2)"
-di "    Table6_Heterogeneity.xls  - Education, SALT, gender subgroups"
-di "    Table7_Continuous_DiD.xls - State-level treatment intensity"
-di "    Table8_Robustness.xls     - Robustness checks"
+di "    Table2_Main_DiD.xls        - Main DiD estimates (H1); cols (7)-(8) NEW"
+di "    Table3_EventStudy.xls      - Parallel trends test (-5/+5 window)"
+di "    Table9_TaxSeason_TripleDiD.xls - [NEW] Treat x Post x Tax-season"
+di "    Table4_Gender.xls          - Gender heterogeneity (H3)"
+di "    Table10_Subgroup_EventStudy.xls - [NEW] Pre-trends: college+, high-SALT"
+di "    Table5_WellBeing.xls       - Well-being outcomes (H2)"
+di "    Table6_Heterogeneity.xls   - Education, SALT, gender subgroups"
+di "    Table7_Continuous_DiD.xls  - State-level treatment intensity"
+di "    Table8_Robustness.xls      - Robustness checks"
 di ""
 di "  Figures (PNG, 2400px wide):"
-di "    Figure1_EventStudy.png    - Main event study (vertical, Δ minutes)"
-di "    Figure2_EventStudy_*.png  - Event study by gender (Men, Women)"
-di "    Figure3_FinancialTime_Trends.png - Mean trends by treatment group"
-di "    Figure4_Gender_Trends.png        - Mean trends by gender x treatment"
+di "    Figure1_EventStudy.png     - Main event study (vertical, delta minutes)"
+di "    Figure2_EventStudy_*.png   - Event study by gender (Men, Women)"
+di "    Figure5_EventStudy_CollegePlus.png - [NEW] Event study, college+"
+di "    Figure6_EventStudy_HighSALT.png    - [NEW] Event study, high-SALT states"
+di "    Figure3_FinancialTime_Trends.png   - Mean trends by treatment group"
+di "    Figure4_Gender_Trends.png          - Mean trends by gender x treatment"
+di ""
+di "  Also check the Stata log for:"
+di "    - the 'transition zone' sample diagnostic (from Sample_Creation_TCJA.do)"
+di "    - the minimum detectable effect and magnitude plausibility check"
+di "      (Part VIII-B above)"
 di "=================================================================="
 
 *log close

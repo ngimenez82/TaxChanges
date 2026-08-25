@@ -33,6 +33,27 @@
 *    - Homeownership not directly in ATUS; proxied by income + marriage
 *      (see treatment_proxy variable below)
 *
+*  REVISION HISTORY (response to JEBO reviewer comments, Aug 2026):
+*    - NEW: tax_act / tax_time / tax  - narrow "tax and insurance" outcome,
+*      subset of `financial`, per Reviewer #2's request for a higher-powered,
+*      more directly-affected outcome (see PART VII, Analysis do-file).
+*    - NEW: month / tax_season - interview-month based tax-filing-season flag
+*      and triple-diff support variables (treat_x_season, post_x_season,
+*      did_x_season), per Reviewer #1 pt.3 and Reviewer #2 "tax season"
+*      comments. REQUIRES an interview-month variable in ATUS_Clean.dta -
+*      see the guarded block below; edit it if your extract uses a
+*      different variable name.
+*    - NEW: in_did_sample flag + diagnostic tabulations, to resolve the
+*      Reviewer #2 minor comment about the "transition zone" ($35-50k)
+*      being described as excluded (p.9) but apparently included in some
+*      Table 3 columns. This script does NOT silently redefine the analysis
+*      sample - it surfaces the discrepancy so you can fix whichever side
+*      (text or code) is wrong, since I cannot verify the actual N's without
+*      running your data.
+*    - NEW: state-level itemization-decline diagnostic (delta_1718 by
+*      group), used in the Analysis do-file's magnitude/plausibility check
+*      (Reviewer #1 pt.4).
+*
 *  AUTHOR: [Your name]
 *  LAST UPDATED: 2026
 *
@@ -139,6 +160,15 @@ foreach v of varlist government_worker private_worker self_employed_worker {
 generate financial_act = 1 if inlist(activity, ///
     20901, 20902, 80201, 80202, 80203, 80299, 100103, 180802)
 
+*--- NEW: narrow "tax and insurance" activity subset of financial_act ---
+*   Reviewer #2: "It would seem obvious to examine sensitivity to a narrower
+*   time use outcome: time spent on tax planning specifically." Codes
+*   20902 (tax preparation/filing) and 100103 (using financial services,
+*   incl. insurance claims) are the subset of financial_act's codes that
+*   plausibly respond to the standard-deduction change, as opposed to
+*   day-to-day banking/investment management which should not.
+generate tax_act = 1 if inlist(activity, 20902, 100103)
+
 generate personal_care_act = 1 if inlist(activity, ///
     10101,10102,10199,10201,10299,10301,10399,10401,10499,10501,10599,19999, ///
     80401,80402,80403,80499,80501,80502,80599,110101,110201,110299,119999, ///
@@ -191,7 +221,7 @@ generate leisure_act = 1 if inlist(activity, ///
     181205,181206,181299,181301,181302,181399,181401,181499,181501,181599,181601,181699, ///
     181801,181899,189999)
 
-foreach v of varlist personal_care_act housework_act financial_act childcare_act ///
+foreach v of varlist personal_care_act housework_act financial_act tax_act childcare_act ///
                        adult_care_act market_work_act study_act leisure_act {
     replace `v' = 0 if `v' == .
 }
@@ -208,6 +238,15 @@ foreach act in personal_care housework financial childcare adult_care ///
                market_work study leisure {
     by caseid: egen `act' = sum(`act'_time)
 }
+
+*--- NEW: aggregate narrow tax/insurance time (subset of `financial`) ---
+*   Kept as a SEPARATE variable, not added into total_time, to avoid
+*   double-counting (its minutes are already inside `financial`).
+generate tax_time = duration if tax_act == 1
+replace  tax_time = 0 if tax_time == .
+sort caseid
+by caseid: egen tax = sum(tax_time)
+label variable tax "Daily minutes: tax prep/filing + insurance claims (narrow outcome; subset of financial)"
 
 generate total_time = personal_care + housework + financial + childcare + ///
                       adult_care + market_work + study + leisure
@@ -242,6 +281,44 @@ replace wt06 = wt20 if wt06 == .
 generate post_tcja = (year >= 2018)
 label variable post_tcja "= 1 if year >= 2018 (TCJA effective Jan 1, 2018)"
 
+*--- NEW: interview month + tax filing season indicator ---
+*   Reviewer #1 (pt.3) and Reviewer #2 both suggest exploiting the fact that
+*   the standard-deduction change should only plausibly affect time use
+*   during the filing season (~mid-Jan to mid-Apr), not year-round. This
+*   requires an interview-month variable in ATUS_Clean.dta.
+*   IMPORTANT: verify the correct variable name for YOUR extract. IPUMS
+*   ATUS-X extracts typically call it MONTH. The block below tries a couple
+*   of common alternatives and stops with an informative error rather than
+*   silently mis-defining tax_season if none is found - do not remove the
+*   "exit" without first confirming the correct variable name.
+capture confirm variable month
+if _rc != 0 {
+    capture confirm variable tumonth
+    if _rc == 0 {
+        rename tumonth month
+    }
+    else {
+        capture confirm variable intmonth
+        if _rc == 0 {
+            rename intmonth month
+        }
+        else {
+            di as error "ERROR: no interview-month variable found in ATUS_Clean.dta"
+            di as error "(tried: month, tumonth, intmonth)."
+            di as error "Re-extract from IPUMS ATUS-X including MONTH, or edit this"
+            di as error "block with the correct variable name before proceeding -"
+            di as error "the tax-season triple-diff (Analysis do-file, Part III-B)"
+            di as error "depends on it."
+            exit 111
+        }
+    }
+}
+generate tax_season = inlist(month, 1, 2, 3, 4)
+label variable tax_season "=1 if diary day falls Jan-Apr (approx. tax filing season)"
+qui sum tax_season
+di "Share of person-days in tax_season window (Jan-Apr): " %4.1f 100*r(mean) "%"
+di "  (sanity check: should be roughly 4/12 = 33% if diary days are spread evenly across the year)"
+
 *--- Individual-level treatment proxy ---
 *  TREATED: income $50k-$100k (famincome 12-14) - pre-TCJA itemization ~43%
 *  CONTROL: income < $35k (famincome <= 9)       - pre-TCJA itemization ~5-18%
@@ -269,6 +346,21 @@ generate did_high   = treatment_high * post_tcja
 
 label variable did_ind  "DiD: treatment_ind * post_tcja"
 label variable did_high "DiD: treatment_high * post_tcja"
+
+*--- NEW: triple-diff support variables (treatment x post x tax_season) ---
+*   Lower-order interactions included so the triple-interaction coefficient
+*   (did_x_season) is correctly identified. did_x_season is the KEY
+*   coefficient for the tax-season robustness/mechanism test (Analysis
+*   do-file, Part III-B): if the TCJA effect operates through filing
+*   season as the paper's own story implies, did_ind (the effect OUTSIDE
+*   tax season) should be near zero and did_x_season should pick up the
+*   filing-season-specific effect.
+generate treat_x_season = treatment_ind * tax_season
+generate post_x_season  = post_tcja * tax_season
+generate did_x_season   = did_ind * tax_season
+label variable treat_x_season "Treatment_ind x Tax season"
+label variable post_x_season  "Post_tcja x Tax season"
+label variable did_x_season   "Triple-diff: Treatment x Post x Tax season"
 
 *--- Event-study year dummies ---
 *   t = 0  -> 2018 (TCJA effective Jan 1, 2018)
@@ -306,6 +398,47 @@ generate did_proxy = treatment_proxy * post_tcja
 label variable treatment_proxy "Treatment * homeowner proxy"
 label variable did_proxy "DiD with homeownership proxy"
 
+*--- NEW: explicit DiD estimation-sample flag + diagnostic ---
+*   Reviewer #2 (minor comment) flagged an apparent inconsistency: the text
+*   (p.9) says the $35-50k "transition zone" (and >$100k) are excluded from
+*   the full analysis, but the N's reported for Table 3 columns (2) "Full
+*   controls" vs (3) "Clean sample" don't obviously square with that claim -
+*   87,779 vs 53,954 is a much bigger gap than just dropping the transition
+*   zone should produce, given famincome 1-16 are ALL still in this saved
+*   dataset at this point (only famincome > 16 was dropped in STEP 2).
+*   This block does NOT silently redefine the estimation sample used
+*   elsewhere in the code (Table 2 columns 1-2 currently run on the FULL
+*   1-16 famincome range, only column 3 restricts explicitly) - it just
+*   makes the discrepancy visible so you can decide which side (paper text,
+*   or Table 2 columns 1-2/4-6) needs to be corrected before resubmission.
+generate in_did_sample = (treatment_ind == 1 | control_group == 1)
+label variable in_did_sample "=1 if in treatment OR control group (excludes $35-50k transition zone & $100k+)"
+
+di ""
+di "=================================================================="
+di "  DIAGNOSTIC: sample composition by famincome, for the Reviewer #2"
+di "  'transition zone' consistency check (compare to paper Table 1/3)"
+di "=================================================================="
+tab famincome treatment_ind, missing
+tab famincome control_group, missing
+count
+di "  Total person-days (famincome 1-16, no treat/control restriction)."
+count if in_did_sample == 1
+di "  Person-days if restricted to treatment OR control (excl. transition zone & >100k)."
+count if treatment_ind == 1
+count if control_group == 1
+count if treatment_ind == 0 & control_group == 0 & treatment_high == 0
+di "  ^ Person-days in the $35-50k 'transition zone' specifically."
+count if treatment_high == 1
+di "  ^ Person-days with income $100k+ ('high income', also NOT in treat/control)."
+di "  If Table 2 columns (1)-(2) and (4)-(6) do not explicitly 'keep if"
+di "  in_did_sample==1', the transition zone and/or high-income households"
+di "  ARE currently part of the implicit comparison group in those columns -"
+di "  this is very likely what the reviewer's Table 3 col.(2) vs col.(3) N"
+di "  comparison picked up on. See Analysis_DiD_TCJA.do Part II."
+di "=================================================================="
+di ""
+
 
 ********************************************************************************
 ** STEP 4: MERGE STATE-LEVEL TREATMENT INTENSITY
@@ -330,6 +463,27 @@ generate high_salt_state = (treat_quintile == 5)
 generate did_salt = high_salt_state * post_tcja
 label variable high_salt_state "= 1 if state in top quintile of pre-TCJA itemization"
 label variable did_salt "DiD: high_salt_state * post_tcja"
+
+*--- NEW: data-driven itemization-decline diagnostic (magnitude check) ---
+*   Reviewer #1 (pt.4) computed an implied treatment-on-the-treated effect
+*   using an ASSUMED ~30pp itemization gap from Tax Foundation (2019)
+*   figures. Here we compute the analogous gap directly from the merged
+*   IRS SOI state-level data (delta_1718 = state pp change in itemization,
+*   2017->2018) for the treatment vs control group, so the Analysis
+*   do-file's magnitude/plausibility check (Part VIII-B) uses a
+*   data-driven number instead of an assumption. NOTE: this is a
+*   STATE-level average, not individual switcher status (ATUS has no
+*   itemization variable) - treat it as an approximation, not a precise
+*   treatment-on-the-treated estimate.
+preserve
+    collapse (mean) delta_1718 [aw = wt06], by(treatment_ind control_group)
+    di ""
+    di "--- Mean state-level pp change in itemization rate, 2017->2018, by group ---"
+    list, clean noobs
+    di "(treatment_ind==1 row: treated group; control_group==1 row: control group;"
+    di " both 0: transition zone/high income, not used in main DiD)"
+    di ""
+restore
 
 
 ********************************************************************************
@@ -418,6 +572,9 @@ foreach v of varlist government_worker private_worker self_employed_worker {
 generate financial_act = 1 if inlist(activity, ///
     20901, 20902, 80201, 80202, 80203, 80299, 100103, 180802)
 
+*--- NEW: narrow tax/insurance activity, for parity with the time-use sample ---
+generate tax_act = 1 if inlist(activity, 20902, 100103)
+
 generate personal_care_act = 1 if inlist(activity, ///
     10101,10102,10199,10201,10299,10301,10399,10401,10499,10501,10599,19999, ///
     80401,80402,80403,80499,80501,80502,80599,110101,110201,110299,119999, ///
@@ -470,7 +627,7 @@ generate leisure_act = 1 if inlist(activity, ///
     181205,181206,181299,181301,181302,181399,181401,181499,181501,181599,181601,181699, ///
     181801,181899,189999)
 
-foreach v of varlist personal_care_act housework_act financial_act childcare_act ///
+foreach v of varlist personal_care_act housework_act financial_act tax_act childcare_act ///
                        adult_care_act market_work_act study_act leisure_act {
     replace `v' = 0 if `v' == .
 }
@@ -487,6 +644,13 @@ foreach act in personal_care housework financial childcare adult_care ///
                market_work study leisure {
     by caseid: egen `act' = sum(`act'_time)
 }
+
+*--- NEW: narrow tax/insurance time, well-being sample (parity with STEP 2) ---
+generate tax_time = duration if tax_act == 1
+replace  tax_time = 0 if tax_time == .
+sort caseid
+by caseid: egen tax = sum(tax_time)
+label variable tax "Daily minutes: tax prep/filing + insurance claims (narrow outcome)"
 
 generate total_time = personal_care + housework + financial + childcare + ///
                       adult_care + market_work + study + leisure
