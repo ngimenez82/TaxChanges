@@ -1,0 +1,29 @@
+	(1)	(2)
+VARIABLES	College+ : Event Study	High-SALT : Event Study
+		
+treat_yr_2013	1.689	3.787*
+	(1.656)	(1.828)
+treat_yr_2014	0.977	2.753**
+	(1.437)	(0.992)
+treat_yr_2015	-0.606	2.149*
+	(1.590)	(1.007)
+treat_yr_2016	-0.403	3.865*
+	(1.926)	(1.732)
+treat_yr_2018	-0.153	4.488
+	(2.180)	(3.318)
+treat_yr_2019	-1.840	1.639
+	(1.768)	(1.157)
+treat_yr_2021	-0.156	3.986*
+	(1.920)	(2.140)
+treat_yr_2022	-1.116	-0.113
+	(1.769)	(1.845)
+treat_yr_2023	0.351	3.161**
+	(1.428)	(0.990)
+Constant	-4.471	-1.147
+	(2.770)	(3.862)
+		
+Observations	56,282	23,089
+R-squared	0.019	0.024
+Subgroup	College-educated	High-SALT states
+Robust standard errors in parentheses		
+*** p<0.01, ** p<0.05, * p<0.1		
