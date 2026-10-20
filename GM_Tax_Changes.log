@@ -1,9 +1,1362 @@
 --------------------------------------------------------------------------------------------------------------------
       name:  <unnamed>
-       log:  C:\data\GMX_Tax_Changes\Results/All_Results.log
+       log:  C:\data\GM_Tax_Changes\GM_Tax_Changes.log
   log type:  text
- opened on:  14 May 2026, 12:36:10
+ opened on:  17 Aug 2026, 10:32:50
 
+. 
+. **we call the sample selection and analysis files
+. 
+. do Dofiles/Sample_Creation_TCJA.do
+
+. /*******************************************************************************
+> *
+> *  Sample_Creation_TCJA.do
+> *
+> *  PURPOSE: Build analysis samples for the paper
+> *    "Causal Effects of Financial Complexity Shocks on Time Use and
+> *     Emotional Well-Being: Evidence from Tax Policy Changes (TCJA 2017)"
+> *
+> *  INPUTS:
+> *    - Data/ATUS_Clean.dta               (from existing Sample_Creation_Financial.do)
+> *    - Data/TCJA_State_Treatment.dta     (derived from IRS SOI Historic Table 2;
+> *                                         see TCJA_State_Data_DiD.xlsx, Sheet 1)
+> *
+> *  OUTPUTS:
+> *    - Data/TCJA_Financial_Time.dta      (individual-level time-use sample)
+> *    - Data/TCJA_Financial_WellBeing.dta (episode-level well-being sample)
+> *
+> *  SAMPLE PERIOD: 2013-2023 (ATUS waves spanning pre/post TCJA, -5/+5 window)
+> *  IDENTIFICATION: Difference-in-Differences
+> *    - Treatment: households with income >= $50k (famincome >= 12)
+> *                 plausibly switched from itemizing to standard deduction
+> *    - Control  : households with income < $35k (famincome <= 9)
+> *                 rarely itemized in either period
+> *    - Post      : year >= 2018 (TCJA effective Jan 1, 2018)
+> *    - Event time: t = 0  -> 2018 (entry into force)
+> *                  t = -1 -> 2017 (base / omitted year)
+> *                  Window: -5/+5
+> *
+> *  NOTES:
+> *    - Parallel trends tested using pre-reform ATUS waves (2013-2017)
+> *    - ATUS WBM available only in 2010, 2012, 2013, 2021 - use 2013 as
+> *      pre-period and 2021 as post-period for well-being analysis
+> *    - Homeownership not directly in ATUS; proxied by income + marriage
+> *      (see treatment_proxy variable below)
+> *
+> *  REVISION HISTORY (response to JEBO reviewer comments, Aug 2026):
+> *    - NEW: tax_act / tax_time / tax  - narrow "tax and insurance" outcome,
+> *      subset of `financial`, per Reviewer #2's request for a higher-powered,
+> *      more directly-affected outcome (see PART VII, Analysis do-file).
+> *    - NEW: month / tax_season - interview-month based tax-filing-season flag
+> *      and triple-diff support variables (treat_x_season, post_x_season,
+> *      did_x_season), per Reviewer #1 pt.3 and Reviewer #2 "tax season"
+> *      comments. REQUIRES an interview-month variable in ATUS_Clean.dta -
+> *      see the guarded block below; edit it if your extract uses a
+> *      different variable name.
+> *    - NEW: in_did_sample flag + diagnostic tabulations, to resolve the
+> *      Reviewer #2 minor comment about the "transition zone" ($35-50k)
+> *      being described as excluded (p.9) but apparently included in some
+> *      Table 3 columns. This script does NOT silently redefine the analysis
+> *      sample - it surfaces the discrepancy so you can fix whichever side
+> *      (text or code) is wrong, since I cannot verify the actual N's without
+> *      running your data.
+> *    - NEW: state-level itemization-decline diagnostic (delta_1718 by
+> *      group), used in the Analysis do-file's magnitude/plausibility check
+> *      (Reviewer #1 pt.4).
+> *
+> *  AUTHOR: [Your name]
+> *  LAST UPDATED: 2026
+> *
+> *******************************************************************************/
+. 
+. clear
+
+. set more off
+
+. 
+. ********************************************************************************
+. ** STEP 1: CREATE STATE-LEVEL TCJA TREATMENT INTENSITY FILE
+. ** (Run once; skip if Data/TCJA_State_Treatment.dta already exists)
+. ********************************************************************************
+. 
+. *  Enter the state-level itemization rates from the Excel file
+. *  (TCJA_State_Data_DiD.xlsx, Sheet 1).
+. *  pre_itemize_rate = average itemization rate 2015-2017 (treatment intensity)
+. *  post_itemize_rate = average itemization rate 2018-2022
+. 
+. *  *** IMPORT FROM EXCEL ***
+. capture confirm file "Data/TCJA_State_Treatment.dta"
+
+. if _rc != 0 {
+. 
+.     import excel using "Data/TCJA_State_Data_DiD.xlsx", ///
+>         sheet("1_State_TCJA_Data") cellrange(A4:S54) clear
+. 
+.     *--- rename columns imported from Excel to Stata-friendly names ---
+.     rename (A B C D E F G H I J K L M N O P Q R) ///
+>            (state_name state_abbr statefip ///
+>             item2015 item2016 item2017 item2018 item2019 item2020 item2021 item2022 ///
+>             delta_1718 treat_intensity ///
+>             homeown_rate med_hh_income top_state_tax med_home_val no_income_tax)
+. 
+.     *--- Force ALL numeric columns to numeric (Excel often imports them as strings) ---
+.     destring statefip item2015 item2016 item2017 item2018 item2019 ///
+>              item2020 item2021 item2022 delta_1718 treat_intensity ///
+>              homeown_rate med_hh_income top_state_tax med_home_val no_income_tax, ///
+>              replace ignore(",%$ ")
+. 
+.     *--- drop national row & any blank trailing rows ---
+.     drop if missing(statefip)
+.     drop if statefip == 0
+. 
+.     *--- Recompute treat_intensity and delta_1718 in Stata ---
+.     *   The Excel columns L (delta_1718) and M (treat_intensity) are unreliable
+.     *   (often empty or 0). Derive them directly from the item20XX series.
+.     drop treat_intensity delta_1718
+.     generate treat_intensity = (item2015 + item2016 + item2017) / 3
+.     generate delta_1718      = item2018 - item2017
+. 
+.     *--- Sanity check: treat_intensity must vary across states ---
+.     qui sum treat_intensity
+.     if r(sd) == 0 | r(sd) == . {
+.         di as error "ERROR: treat_intensity has no variation across states."
+.         di as error "Check item2015-item2017 in the Excel file (columns D-F)."
+.         di as error "Aborting STEP 1 - the saved .dta would be unusable."
+.         exit 459
+.     }
+.     di as text "OK: treat_intensity computed from item2015-2017, " ///
+>        "varies across `=_N' states " ///
+>        "(min = `: di %4.3f r(min)', max = `: di %4.3f r(max)', " ///
+>        "sd = `: di %4.3f r(sd)')."
+. 
+.     *--- label ---
+.     label variable treat_intensity ///
+>         "State avg itemization rate 2015-17 (DiD treatment intensity)"
+.     label variable item2017 "Share returns itemized, 2017 (pre-TCJA)"
+.     label variable delta_1718 "pp change in itemization 2017-2018 (TCJA shock)"
+.     label variable homeown_rate "Homeownership rate 2016 (Census ACS)"
+.     label variable top_state_tax "Top marginal state income tax rate 2017"
+.     label variable no_income_tax "= 1 if state has no personal income tax"
+. 
+.     *--- quintiles of treatment intensity (for heterogeneity) ---
+.     xtile treat_quintile = treat_intensity, nq(5)
+.     label variable treat_quintile "Quintile of pre-TCJA itemization intensity"
+. 
+.     save "Data/TCJA_State_Treatment.dta", replace
+.     di "State treatment file saved with `=_N' states."
+. }
+
+. 
+. 
+. ********************************************************************************
+. ** STEP 2: BUILD THE TIME-USE SAMPLE (equivalent to Financial_Time_in_Activities)
+. ********************************************************************************
+. 
+. clear
+
+. use "Data/ATUS_Clean.dta", clear
+
+. 
+. *--- Restrict to 2013-2023 (extended for -5/+5 event-study window) ---
+. keep if year >= 2013 & year <= 2023
+(2,693,839 observations deleted)
+
+. 
+. *--- Employment filter (same as original paper) ---
+. drop if empstat == 2        // absent from work
+(55,084 observations deleted)
+
+. rename clwkr class_of_worker
+
+. 
+. generate government_worker   = inlist(class_of_worker, 1, 2, 3)
+
+. generate private_worker      = inlist(class_of_worker, 4, 5)
+
+. generate self_employed_worker = inlist(class_of_worker, 6, 7)
+
+. 
+. foreach v of varlist government_worker private_worker self_employed_worker {
+  2.     replace `v' = 0 if `v' == .
+  3. }
+(0 real changes made)
+(0 real changes made)
+(0 real changes made)
+
+. 
+. *--- Activity classifications (identical to original code) ---
+. generate financial_act = 1 if inlist(activity, ///
+>     20901, 20902, 80201, 80202, 80203, 80299, 100103, 180802)
+(1,960,406 missing values generated)
+
+. 
+. *--- NEW: narrow "tax and insurance" activity subset of financial_act ---
+. *   Reviewer #2: "It would seem obvious to examine sensitivity to a narrower
+. *   time use outcome: time spent on tax planning specifically." Codes
+. *   20902 (tax preparation/filing) and 100103 (using financial services,
+. *   incl. insurance claims) are the subset of financial_act's codes that
+. *   plausibly respond to the standard-deduction change, as opposed to
+. *   day-to-day banking/investment management which should not.
+. generate tax_act = 1 if inlist(activity, 20902, 100103)
+(1,969,070 missing values generated)
+
+. 
+. generate personal_care_act = 1 if inlist(activity, ///
+>     10101,10102,10199,10201,10299,10301,10399,10401,10499,10501,10599,19999, ///
+>     80401,80402,80403,80499,80501,80502,80599,110101,110201,110299,119999, ///
+>     180101,180199,180804,180805,180899,181101,181199)
+(1,345,616 missing values generated)
+
+. 
+. generate housework_act = 1 if inlist(activity, ///
+>     20101,20102,20103,20104,20199,20201,20202,20203,20299,20301,20302,20303,20399, ///
+>     20401,20402,20499,20501,20502,20599,20601,20602,20603,20699,20701,20799,20801,20899, ///
+>     20903,20904,20905,20999,29999,40501,40502,40503,40504,40505,40506,40507,40508,40599,49999, ///
+>     70101,70102,70103,70104,70105,70199,70201,70299,70301,70399,79999,80301,80302,80399, ///
+>     80601,80602,80699,80701,80702,80799,80801,89999,90101,90102,90103,90104,90199,90201,90202, ///
+>     90299,90301,90302,90399,90401,90402,90499,90501,90502,90599,99999,100101,100102,100199, ///
+>     100201,100299,100303,100304,100399,100401,100499,109999,180201,180202,180203,180204,180205, ///
+>     180206,180207,180208,180209,180299,180701,180702,180703,180704,180705,180799,180801,180803, ///
+>     180806,180807,180901,180902,180903,180904,180905,180999,181001,181002,181099)
+(1,506,431 missing values generated)
+
+. 
+. generate childcare_act = 1 if inlist(activity, ///
+>     30101,30102,30103,30104,30105,30106,30107,30108,30109,30110,30111,30112,30199, ///
+>     30201,30202,30203,30204,30299,30301,30302,30303,30399,30401,30402,30403,30404,30405,30499, ///
+>     40101,40102,40103,40104,40105,40106,40107,40108,40109,40110,40111,40112,40199, ///
+>     40201,40202,40203,40204,40299,40301,40302,40303,40399,80101,80102,80199, ///
+>     180301,180302,180303,180304,180401,180402,180403,180404)
+(1,856,852 missing values generated)
+
+. 
+. generate adult_care_act = 1 if inlist(activity, ///
+>     30501,30502,30503,30504,30599,39999,40401,40402,40403,40404,40405,40499, ///
+>     180305,180306,180307,180399,180405,180406,180407,180499)
+(1,967,968 missing values generated)
+
+. 
+. generate market_work_act = 1 if inlist(activity, ///
+>     50101,50102,50103,50104,50199,50201,50202,50203,50204,50205,50299, ///
+>     50301,50302,50303,50304,50305,50399,50401,50403,50404,50405,50499,59999, ///
+>     180501,180502,180503,180504,180599)
+(1,848,102 missing values generated)
+
+. 
+. generate study_act = 1 if inlist(activity, ///
+>     60101,60102,60103,60104,60199,60201,60202,60203,60204,60299,60301,60302,60303,60399, ///
+>     60401,60402,60403,60499,69999,180601,180602,180603,180604,180605,180699)
+(1,977,349 missing values generated)
+
+. 
+. generate leisure_act = 1 if inlist(activity, ///
+>     120101,120199,120201,120202,120299,120301,120302,120303,120304,120305,120306,120307, ///
+>     120308,120309,120310,120311,120312,120313,120399,120401,120402,120403,120404,120405,120499, ///
+>     120501,120502,120503,120504,120599,129999,130101,130102,130103,130104,130105,130106,130107, ///
+>     130108,130109,130110,130111,130112,130113,130114,130115,130116,130117,130118,130119,130120, ///
+>     130121,130122,130123,130124,130125,130126,130127,130128,130129,130130,130131,130132,130133, ///
+>     130134,130135,130136,130199,130201,130202,130203,130204,130205,130206,130207,130209,130210, ///
+>     130211,130212,130213,130214,130215,130216,130217,130218,130219,130220,130221,130222,130223, ///
+>     130224,130225,130226,130227,130229,130230,130231,130232,130299,130301,130302,130399,130401, ///
+>     130402,139999,140101,140102,140103,140104,140105,149999,150101,150102,150103,150104,150105, ///
+>     150106,150199,150201,150202,150203,150204,150299,150301,150302,150399,150401,150402,150499, ///
+>     150501,150599,150601,150602,150699,150701,150799,150801,150899,159999,160101,160102,160103, ///
+>     160104,160105,160106,160107,160108,160199,160201,160299,169999,181201,181202,181203,181204, ///
+>     181205,181206,181299,181301,181302,181399,181401,181499,181501,181599,181601,181699, ///
+>     181801,181899,189999)
+(1,500,937 missing values generated)
+
+. 
+. foreach v of varlist personal_care_act housework_act financial_act tax_act childcare_act ///
+>                        adult_care_act market_work_act study_act leisure_act {
+  2.     replace `v' = 0 if `v' == .
+  3. }
+(1,345,616 real changes made)
+(1,506,431 real changes made)
+(1,960,406 real changes made)
+(1,969,070 real changes made)
+(1,856,852 real changes made)
+(1,967,968 real changes made)
+(1,848,102 real changes made)
+(1,977,349 real changes made)
+(1,500,937 real changes made)
+
+. 
+. *--- Aggregate time per activity category ---
+. foreach act in personal_care housework financial childcare adult_care ///
+>                market_work study leisure {
+  2.     generate `act'_time = duration if `act'_act == 1
+  3.     replace  `act'_time = 0 if `act'_time == .
+  4. }
+(1,345,616 missing values generated)
+(1,345,616 real changes made)
+(1,506,431 missing values generated)
+(1,506,431 real changes made)
+(1,960,406 missing values generated)
+(1,960,406 real changes made)
+(1,856,852 missing values generated)
+(1,856,852 real changes made)
+(1,967,968 missing values generated)
+(1,967,968 real changes made)
+(1,848,102 missing values generated)
+(1,848,102 real changes made)
+(1,977,349 missing values generated)
+(1,977,349 real changes made)
+(1,500,937 missing values generated)
+(1,500,937 real changes made)
+
+. 
+. sort caseid
+
+. foreach act in personal_care housework financial childcare adult_care ///
+>                market_work study leisure {
+  2.     by caseid: egen `act' = sum(`act'_time)
+  3. }
+
+. 
+. *--- NEW: aggregate narrow tax/insurance time (subset of `financial`) ---
+. *   Kept as a SEPARATE variable, not added into total_time, to avoid
+. *   double-counting (its minutes are already inside `financial`).
+. generate tax_time = duration if tax_act == 1
+(1,969,070 missing values generated)
+
+. replace  tax_time = 0 if tax_time == .
+(1,969,070 real changes made)
+
+. sort caseid
+
+. by caseid: egen tax = sum(tax_time)
+
+. label variable tax "Daily minutes: tax prep/filing + insurance claims (narrow outcome; subset of financial)"
+note: label truncated to 80 characters
+
+. 
+. generate total_time = personal_care + housework + financial + childcare + ///
+>                       adult_care + market_work + study + leisure
+
+. 
+. *--- Wages ---
+. replace earnweek = . if earnweek == 0 | earnweek == 99999.99
+(2,037 real changes made, 2,037 to missing)
+
+. replace hourwage = . if hourwage == 0 | hourwage == 999.99
+(181 real changes made, 181 to missing)
+
+. replace otpay    = 0 if otpay >= 3000
+(1,919,714 real changes made)
+
+. gen wage = hourwage if hourwage != .
+(181 missing values generated)
+
+. replace wage = earnweek / uhrsworkt if wage == . & earnweek != .
+(136 real changes made)
+
+. replace wage = wage + otpay / uhrsworkt if wage != .
+(62,140 real changes made, 503 to missing)
+
+. replace wage = . if uhrsworkt == 9995 & hourwage > 100
+(38,125 real changes made, 38,125 to missing)
+
+. 
+. *--- Keep one record per person-day ---
+. keep if actline == 1
+(1,886,304 observations deleted)
+
+. 
+. *--- Sample filters ---
+. drop if famincome > 16
+(0 observations deleted)
+
+. replace ageychild = 0 if ageychild > 17
+(65,766 real changes made)
+
+. generate age_2 = (age * age) / 100
+
+. drop if total_time < 1440      // must have complete diary day
+(17,480 observations deleted)
+
+. 
+. *--- Wage weight ---
+. replace wt06 = wt20 if wt06 == .
+(6,896 real changes made)
+
+. 
+. 
+. ********************************************************************************
+. ** STEP 3: CONSTRUCT DiD TREATMENT VARIABLES
+. ********************************************************************************
+. 
+. *--- Time variables ---
+. generate post_tcja = (year >= 2018)
+
+. label variable post_tcja "= 1 if year >= 2018 (TCJA effective Jan 1, 2018)"
+
+. 
+. *--- NEW: interview month + tax filing season indicator ---
+. *   Reviewer #1 (pt.3) and Reviewer #2 both suggest exploiting the fact that
+. *   the standard-deduction change should only plausibly affect time use
+. *   during the filing season (~mid-Jan to mid-Apr), not year-round. This
+. *   requires an interview-month variable in ATUS_Clean.dta.
+. *   IMPORTANT: verify the correct variable name for YOUR extract. IPUMS
+. *   ATUS-X extracts typically call it MONTH. The block below tries a couple
+. *   of common alternatives and stops with an informative error rather than
+. *   silently mis-defining tax_season if none is found - do not remove the
+. *   "exit" without first confirming the correct variable name.
+. capture confirm variable month
+
+. if _rc != 0 {
+.     capture confirm variable tumonth
+.     if _rc == 0 {
+.         rename tumonth month
+.     }
+.     else {
+.         capture confirm variable intmonth
+.         if _rc == 0 {
+.             rename intmonth month
+.         }
+.         else {
+.             di as error "ERROR: no interview-month variable found in ATUS_Clean.dta"
+.             di as error "(tried: month, tumonth, intmonth)."
+.             di as error "Re-extract from IPUMS ATUS-X including MONTH, or edit this"
+.             di as error "block with the correct variable name before proceeding -"
+.             di as error "the tax-season triple-diff (Analysis do-file, Part III-B)"
+.             di as error "depends on it."
+.             exit 111
+.         }
+.     }
+. }
+
+. generate tax_season = inlist(month, 1, 2, 3, 4)
+
+. label variable tax_season "=1 if diary day falls Jan-Apr (approx. tax filing season)"
+
+. qui sum tax_season
+
+. di "Share of person-days in tax_season window (Jan-Apr): " %4.1f 100*r(mean) "%"
+Share of person-days in tax_season window (Jan-Apr): 35.0%
+
+. di "  (sanity check: should be roughly 4/12 = 33% if diary days are spread evenly across the year)"
+  (sanity check: should be roughly 4/12 = 33% if diary days are spread evenly across the year)
+
+. 
+. *--- Individual-level treatment proxy ---
+. *  TREATED: income $50k-$100k (famincome 12-14) - pre-TCJA itemization ~43%
+. *  CONTROL: income < $35k (famincome <= 9)       - pre-TCJA itemization ~5-18%
+. *
+. *  We define two treatment dummies:
+. *   treatment_ind  = 1 for middle/upper-middle income (most likely switchers)
+. *   treatment_high = 1 for high income ($100k+; famincome >= 15)
+. *                    (likely already itemizing but may have been constrained by SALT cap)
+. 
+. generate treatment_ind = 0
+
+. replace  treatment_ind = 1 if famincome >= 12 & famincome <= 14
+(26,825 real changes made)
+
+. label variable treatment_ind "=1 if famincome $50k-$100k (DiD treated)"
+
+. 
+. generate treatment_high = 0
+
+. replace  treatment_high = 1 if famincome >= 15
+(22,272 real changes made)
+
+. label variable treatment_high "=1 if famincome $100k+ (high-income treated)"
+
+. 
+. generate control_group = 0
+
+. replace  control_group = 1 if famincome <= 9
+(27,129 real changes made)
+
+. label variable control_group "=1 if famincome <$35k (DiD control)"
+
+. 
+. *--- DiD interaction terms ---
+. generate did_ind    = treatment_ind * post_tcja
+
+. generate did_high   = treatment_high * post_tcja
+
+. 
+. label variable did_ind  "DiD: treatment_ind * post_tcja"
+
+. label variable did_high "DiD: treatment_high * post_tcja"
+
+. 
+. *--- NEW: triple-diff support variables (treatment x post x tax_season) ---
+. *   Lower-order interactions included so the triple-interaction coefficient
+. *   (did_x_season) is correctly identified. did_x_season is the KEY
+. *   coefficient for the tax-season robustness/mechanism test (Analysis
+. *   do-file, Part III-B): if the TCJA effect operates through filing
+. *   season as the paper's own story implies, did_ind (the effect OUTSIDE
+. *   tax season) should be near zero and did_x_season should pick up the
+. *   filing-season-specific effect.
+. generate treat_x_season = treatment_ind * tax_season
+
+. generate post_x_season  = post_tcja * tax_season
+
+. generate did_x_season   = did_ind * tax_season
+
+. label variable treat_x_season "Treatment_ind x Tax season"
+
+. label variable post_x_season  "Post_tcja x Tax season"
+
+. label variable did_x_season   "Triple-diff: Treatment x Post x Tax season"
+
+. 
+. *--- Event-study year dummies ---
+. *   t = 0  -> 2018 (TCJA effective Jan 1, 2018)
+. *   Base   = t = -1 -> 2017 (last full pre-reform year)
+. *   Window: -5/+5  ->  2013-2023
+. generate year_rel = year - 2018          // relative year (0 = TCJA effective)
+
+. label variable year_rel "Years relative to TCJA effective date (Jan 2018)"
+
+. 
+. forvalues t = -5/5 {
+  2.     if `t' != -1 {                                      // omit t = -1 (base 2017)
+  3.         local suffix = cond(`t' < 0, "m" + string(-`t'), string(`t'))
+  4.         generate event_yr_`suffix' = (year_rel == `t')
+  5.         label variable event_yr_`suffix' "Event year `t' (= `=`t'+2018')"
+  6.     }
+  7. }
+
+. *  Omit 2020 from event-study interactions (COVID confound)
+. generate covid = (year == 2020)
+
+. 
+. *--- Build married early (needed for homeowner_proxy below; rebuilt in STEP 5 if absent) ---
+. capture confirm variable married
+
+. if _rc != 0 {
+.     generate married = (marst == 1 | marst == 2)
+.     replace  married = 0 if married == .
+(0 real changes made)
+.     label variable married "=1 if married (spouse present or absent)"
+. }
+
+. 
+. *--- Homeownership proxy (ATUS has no direct variable; approximate) ---
+. *   Married households with children and mid-upper income are more likely owners
+. generate homeowner_proxy = (married == 1 & hh_numkids > 0 & famincome >= 12)
+
+. replace  homeowner_proxy = 1 if famincome >= 15   // high income -> likely owner
+(13,533 real changes made)
+
+. label variable homeowner_proxy "Proxy for homeownership (married + children + income)"
+
+. 
+. generate treatment_proxy = treatment_ind * homeowner_proxy
+
+. generate did_proxy = treatment_proxy * post_tcja
+
+. label variable treatment_proxy "Treatment * homeowner proxy"
+
+. label variable did_proxy "DiD with homeownership proxy"
+
+. 
+. *--- NEW: explicit DiD estimation-sample flag + diagnostic ---
+. *   Reviewer #2 (minor comment) flagged an apparent inconsistency: the text
+. *   (p.9) says the $35-50k "transition zone" (and >$100k) are excluded from
+. *   the full analysis, but the N's reported for Table 3 columns (2) "Full
+. *   controls" vs (3) "Clean sample" don't obviously square with that claim -
+. *   87,779 vs 53,954 is a much bigger gap than just dropping the transition
+. *   zone should produce, given famincome 1-16 are ALL still in this saved
+. *   dataset at this point (only famincome > 16 was dropped in STEP 2).
+. *   This block does NOT silently redefine the estimation sample used
+. *   elsewhere in the code (Table 2 columns 1-2 currently run on the FULL
+. *   1-16 famincome range, only column 3 restricts explicitly) - it just
+. *   makes the discrepancy visible so you can decide which side (paper text,
+. *   or Table 2 columns 1-2/4-6) needs to be corrected before resubmission.
+. generate in_did_sample = (treatment_ind == 1 | control_group == 1)
+
+. label variable in_did_sample "=1 if in treatment OR control group (excludes $35-50k transition zone & $100k+)"
+
+. 
+. di ""
+
+
+. di "=================================================================="
+==================================================================
+
+. di "  DIAGNOSTIC: sample composition by famincome, for the Reviewer #2"
+  DIAGNOSTIC: sample composition by famincome, for the Reviewer #2
+
+. di "  'transition zone' consistency check (compare to paper Table 1/3)"
+  'transition zone' consistency check (compare to paper Table 1/3)
+
+. di "=================================================================="
+==================================================================
+
+. tab famincome treatment_ind, missing
+
+           |    =1 if famincome
+           |    $50k-$100k (DiD
+           |       treated)
+ famincome |         0          1 |     Total
+-----------+----------------------+----------
+         1 |     1,874          0 |     1,874 
+         2 |     1,061          0 |     1,061 
+         3 |     1,907          0 |     1,907 
+         4 |     2,480          0 |     2,480 
+         5 |     2,266          0 |     2,266 
+         6 |     3,693          0 |     3,693 
+         7 |     4,607          0 |     4,607 
+         8 |     4,384          0 |     4,384 
+         9 |     4,857          0 |     4,857 
+        10 |     4,518          0 |     4,518 
+        11 |     7,035          0 |     7,035 
+        12 |         0      6,991 |     6,991 
+        13 |         0      9,041 |     9,041 
+        14 |         0     10,793 |    10,793 
+        15 |    11,476          0 |    11,476 
+        16 |    10,796          0 |    10,796 
+-----------+----------------------+----------
+     Total |    60,954     26,825 |    87,779 
+
+. tab famincome control_group, missing
+
+           | =1 if famincome <$35k
+           |     (DiD control)
+ famincome |         0          1 |     Total
+-----------+----------------------+----------
+         1 |         0      1,874 |     1,874 
+         2 |         0      1,061 |     1,061 
+         3 |         0      1,907 |     1,907 
+         4 |         0      2,480 |     2,480 
+         5 |         0      2,266 |     2,266 
+         6 |         0      3,693 |     3,693 
+         7 |         0      4,607 |     4,607 
+         8 |         0      4,384 |     4,384 
+         9 |         0      4,857 |     4,857 
+        10 |     4,518          0 |     4,518 
+        11 |     7,035          0 |     7,035 
+        12 |     6,991          0 |     6,991 
+        13 |     9,041          0 |     9,041 
+        14 |    10,793          0 |    10,793 
+        15 |    11,476          0 |    11,476 
+        16 |    10,796          0 |    10,796 
+-----------+----------------------+----------
+     Total |    60,650     27,129 |    87,779 
+
+. count
+  87,779
+
+. di "  Total person-days (famincome 1-16, no treat/control restriction)."
+  Total person-days (famincome 1-16, no treat/control restriction).
+
+. count if in_did_sample == 1
+  53,954
+
+. di "  Person-days if restricted to treatment OR control (excl. transition zone & >100k)."
+  Person-days if restricted to treatment OR control (excl. transition zone & >100k).
+
+. count if treatment_ind == 1
+  26,825
+
+. count if control_group == 1
+  27,129
+
+. count if treatment_ind == 0 & control_group == 0 & treatment_high == 0
+  11,553
+
+. di "  ^ Person-days in the $35-50k 'transition zone' specifically."
+  ^ Person-days in the $35-50k 'transition zone' specifically.
+
+. count if treatment_high == 1
+  22,272
+
+. di "  ^ Person-days with income $100k+ ('high income', also NOT in treat/control)."
+  ^ Person-days with income $100k+ ('high income', also NOT in treat/control).
+
+. di "  If Table 2 columns (1)-(2) and (4)-(6) do not explicitly 'keep if"
+  If Table 2 columns (1)-(2) and (4)-(6) do not explicitly 'keep if
+
+. di "  in_did_sample==1', the transition zone and/or high-income households"
+  in_did_sample==1', the transition zone and/or high-income households
+
+. di "  ARE currently part of the implicit comparison group in those columns -"
+  ARE currently part of the implicit comparison group in those columns -
+
+. di "  this is very likely what the reviewer's Table 3 col.(2) vs col.(3) N"
+  this is very likely what the reviewer's Table 3 col.(2) vs col.(3) N
+
+. di "  comparison picked up on. See Analysis_DiD_TCJA.do Part II."
+  comparison picked up on. See Analysis_DiD_TCJA.do Part II.
+
+. di "=================================================================="
+==================================================================
+
+. di ""
+
+
+. 
+. 
+. ********************************************************************************
+. ** STEP 4: MERGE STATE-LEVEL TREATMENT INTENSITY
+. ********************************************************************************
+. 
+. *--- Merge state treatment data ---
+. rename statefip statefip_orig    // preserve original
+
+. gen statefip = statefip_orig
+
+. 
+. merge m:1 statefip using "Data/TCJA_State_Treatment.dta", ///
+>     keepusing(treat_intensity item2017 delta_1718 homeown_rate ///
+>               top_state_tax no_income_tax treat_quintile) ///
+>     keep(master match)
+
+    Result                      Number of obs
+    -----------------------------------------
+    Not matched                             0
+    Matched                            87,779  (_merge==3)
+    -----------------------------------------
+
+. drop _merge
+
+. 
+. *--- Continuous DiD: state treatment intensity * post ---
+. generate did_state = treat_intensity * post_tcja
+
+. label variable did_state "Continuous DiD: state treat_intensity * post_tcja"
+
+. 
+. *--- High SALT exposure states (top quintile of pre-TCJA itemization) ---
+. generate high_salt_state = (treat_quintile == 5)
+
+. generate did_salt = high_salt_state * post_tcja
+
+. label variable high_salt_state "= 1 if state in top quintile of pre-TCJA itemization"
+
+. label variable did_salt "DiD: high_salt_state * post_tcja"
+
+. 
+. *--- NEW: data-driven itemization-decline diagnostic (magnitude check) ---
+. *   Reviewer #1 (pt.4) computed an implied treatment-on-the-treated effect
+. *   using an ASSUMED ~30pp itemization gap from Tax Foundation (2019)
+. *   figures. Here we compute the analogous gap directly from the merged
+. *   IRS SOI state-level data (delta_1718 = state pp change in itemization,
+. *   2017->2018) for the treatment vs control group, so the Analysis
+. *   do-file's magnitude/plausibility check (Part VIII-B) uses a
+. *   data-driven number instead of an assumption. NOTE: this is a
+. *   STATE-level average, not individual switcher status (ATUS has no
+. *   itemization variable) - treat it as an approximation, not a precise
+. *   treatment-on-the-treated estimate.
+. preserve
+
+.     collapse (mean) delta_1718 [aw = wt06], by(treatment_ind control_group)
+
+.     di ""
+
+
+.     di "--- Mean state-level pp change in itemization rate, 2017->2018, by group ---"
+--- Mean state-level pp change in itemization rate, 2017->2018, by group ---
+
+.     list, clean noobs
+
+    treatm~d   contro~p   delt~1718  
+           0          0   -.2068491  
+           0          1   -.1999847  
+           1          0   -.2035098  
+
+.     di "(treatment_ind==1 row: treated group; control_group==1 row: control group;"
+(treatment_ind==1 row: treated group; control_group==1 row: control group;
+
+.     di " both 0: transition zone/high income, not used in main DiD)"
+ both 0: transition zone/high income, not used in main DiD)
+
+.     di ""
+
+
+. restore
+
+. 
+. 
+. ********************************************************************************
+. ** STEP 5: STANDARD DEMOGRAPHIC CONTROLS
+. ** (identical to original paper's Analysis_Total_Time.do)
+. ********************************************************************************
+. 
+. generate working   = (empstat == 1)
+
+. generate full_time = 1 if fullpart == 1
+(45,662 missing values generated)
+
+. replace  full_time = 0 if fullpart == 2
+(10,076 real changes made)
+
+. replace  full_time = 0 if working == 0
+(35,586 real changes made)
+
+. 
+. generate educ_1 = (educ < 20)
+
+. generate educ_2 = (educ == 20 | educ == 21)
+
+. generate educ_3 = (educ > 21)
+
+. 
+. generate hispanic = 0 if hisp == 100
+(12,991 missing values generated)
+
+. replace  hispanic = 1 if hispanic == .
+(12,991 real changes made)
+
+. 
+. *--- married already created in STEP 3 (before homeowner_proxy); skip if present ---
+. capture confirm variable married
+
+. if _rc != 0 {
+.     generate married = (marst == 1 | marst == 2)
+.     replace  married = 0 if married == .
+. }
+
+. 
+. capture drop asian
+
+. generate white       = (race == 100)
+
+. generate black       = (race == 110)
+
+. generate indian      = (race == 120)
+
+. generate asian       = (race == 131)
+
+. generate pacific     = (race == 132)
+
+. generate other_races = (race >= 200 & race < 300)
+
+. 
+. foreach v of varlist white black indian asian pacific other_races {
+  2.     replace `v' = 0 if `v' == .
+  3. }
+(0 real changes made)
+(0 real changes made)
+(0 real changes made)
+(0 real changes made)
+(0 real changes made)
+(0 real changes made)
+
+. 
+. generate male = (sex == 1)
+
+. replace  male = 0 if sex == 2
+(0 real changes made)
+
+. 
+. replace retired = 0 if retired > 1
+(69,286 real changes made)
+
+. 
+. generate male_full_time = male * full_time
+
+. 
+. *--- Income dummies ---
+. tab famincome, gen(famincome_)
+
+  famincome |      Freq.     Percent        Cum.
+------------+-----------------------------------
+          1 |      1,874        2.13        2.13
+          2 |      1,061        1.21        3.34
+          3 |      1,907        2.17        5.52
+          4 |      2,480        2.83        8.34
+          5 |      2,266        2.58       10.92
+          6 |      3,693        4.21       15.13
+          7 |      4,607        5.25       20.38
+          8 |      4,384        4.99       25.37
+          9 |      4,857        5.53       30.91
+         10 |      4,518        5.15       36.05
+         11 |      7,035        8.01       44.07
+         12 |      6,991        7.96       52.03
+         13 |      9,041       10.30       62.33
+         14 |     10,793       12.30       74.63
+         15 |     11,476       13.07       87.70
+         16 |     10,796       12.30      100.00
+------------+-----------------------------------
+      Total |     87,779      100.00
+
+. 
+. *--- Year trend (centered at first sample year) ---
+. generate year_c  = year - 2013    // centered year (base = 2013)
+
+. generate year_c2 = year_c ^ 2 / 100
+
+. 
+. 
+. ********************************************************************************
+. ** STEP 6: SAVE TIME-USE SAMPLE
+. ********************************************************************************
+. 
+. save "Data/TCJA_Financial_Time.dta", replace
+file Data/TCJA_Financial_Time.dta saved
+
+. di "TCJA_Financial_Time.dta saved - N = `e(N)' (approx)"
+TCJA_Financial_Time.dta saved - N =  (approx)
+
+. 
+. 
+. ********************************************************************************
+. ** STEP 7: BUILD WELL-BEING SAMPLE
+. ** (ATUS WBM available: 2010, 2012, 2013, 2021)
+. ** Pre-period: 2013  |  Post-period: 2021
+. ********************************************************************************
+. 
+. clear
+
+. use "Data/ATUS_Clean.dta", clear
+
+. 
+. *--- Keep WBM-eligible years only ---
+. keep if inlist(year, 2010, 2012, 2013, 2021)
+(3,872,216 observations deleted)
+
+. 
+. *--- Employment filter ---
+. drop if empstat == 2
+(23,186 observations deleted)
+
+. rename clwkr class_of_worker
+
+. generate government_worker    = inlist(class_of_worker, 1, 2, 3)
+
+. generate private_worker       = inlist(class_of_worker, 4, 5)
+
+. generate self_employed_worker = inlist(class_of_worker, 6, 7)
+
+. foreach v of varlist government_worker private_worker self_employed_worker {
+  2.     replace `v' = 0 if `v' == .
+  3. }
+(0 real changes made)
+(0 real changes made)
+(0 real changes made)
+
+. 
+. *--- Activity classifications (FULL set, identical to STEP 2) ---
+. *   Required to compute total_time = 1440 per person-day before WBM filter
+. generate financial_act = 1 if inlist(activity, ///
+>     20901, 20902, 80201, 80202, 80203, 80299, 100103, 180802)
+(832,163 missing values generated)
+
+. 
+. *--- NEW: narrow tax/insurance activity, for parity with the time-use sample ---
+. generate tax_act = 1 if inlist(activity, 20902, 100103)
+(836,138 missing values generated)
+
+. 
+. generate personal_care_act = 1 if inlist(activity, ///
+>     10101,10102,10199,10201,10299,10301,10399,10401,10499,10501,10599,19999, ///
+>     80401,80402,80403,80499,80501,80502,80599,110101,110201,110299,119999, ///
+>     180101,180199,180804,180805,180899,181101,181199)
+(572,740 missing values generated)
+
+. 
+. generate housework_act = 1 if inlist(activity, ///
+>     20101,20102,20103,20104,20199,20201,20202,20203,20299,20301,20302,20303,20399, ///
+>     20401,20402,20499,20501,20502,20599,20601,20602,20603,20699,20701,20799,20801,20899, ///
+>     20903,20904,20905,20999,29999,40501,40502,40503,40504,40505,40506,40507,40508,40599,49999, ///
+>     70101,70102,70103,70104,70105,70199,70201,70299,70301,70399,79999,80301,80302,80399, ///
+>     80601,80602,80699,80701,80702,80799,80801,89999,90101,90102,90103,90104,90199,90201,90202, ///
+>     90299,90301,90302,90399,90401,90402,90499,90501,90502,90599,99999,100101,100102,100199, ///
+>     100201,100299,100303,100304,100399,100401,100499,109999,180201,180202,180203,180204,180205, ///
+>     180206,180207,180208,180209,180299,180701,180702,180703,180704,180705,180799,180801,180803, ///
+>     180806,180807,180901,180902,180903,180904,180905,180999,181001,181002,181099)
+(646,578 missing values generated)
+
+. 
+. generate childcare_act = 1 if inlist(activity, ///
+>     30101,30102,30103,30104,30105,30106,30107,30108,30109,30110,30111,30112,30199, ///
+>     30201,30202,30203,30204,30299,30301,30302,30303,30399,30401,30402,30403,30404,30405,30499, ///
+>     40101,40102,40103,40104,40105,40106,40107,40108,40109,40110,40111,40112,40199, ///
+>     40201,40202,40203,40204,40299,40301,40302,40303,40399,80101,80102,80199, ///
+>     180301,180302,180303,180304,180401,180402,180403,180404)
+(783,669 missing values generated)
+
+. 
+. generate adult_care_act = 1 if inlist(activity, ///
+>     30501,30502,30503,30504,30599,39999,40401,40402,40403,40404,40405,40499, ///
+>     180305,180306,180307,180399,180405,180406,180407,180499)
+(835,076 missing values generated)
+
+. 
+. generate market_work_act = 1 if inlist(activity, ///
+>     50101,50102,50103,50104,50199,50201,50202,50203,50204,50205,50299, ///
+>     50301,50302,50303,50304,50305,50399,50401,50403,50404,50405,50499,59999, ///
+>     180501,180502,180503,180504,180599)
+(781,250 missing values generated)
+
+. 
+. generate study_act = 1 if inlist(activity, ///
+>     60101,60102,60103,60104,60199,60201,60202,60203,60204,60299,60301,60302,60303,60399, ///
+>     60401,60402,60403,60499,69999,180601,180602,180603,180604,180605,180699)
+(838,058 missing values generated)
+
+. 
+. generate leisure_act = 1 if inlist(activity, ///
+>     120101,120199,120201,120202,120299,120301,120302,120303,120304,120305,120306,120307, ///
+>     120308,120309,120310,120311,120312,120313,120399,120401,120402,120403,120404,120405,120499, ///
+>     120501,120502,120503,120504,120599,129999,130101,130102,130103,130104,130105,130106,130107, ///
+>     130108,130109,130110,130111,130112,130113,130114,130115,130116,130117,130118,130119,130120, ///
+>     130121,130122,130123,130124,130125,130126,130127,130128,130129,130130,130131,130132,130133, ///
+>     130134,130135,130136,130199,130201,130202,130203,130204,130205,130206,130207,130209,130210, ///
+>     130211,130212,130213,130214,130215,130216,130217,130218,130219,130220,130221,130222,130223, ///
+>     130224,130225,130226,130227,130229,130230,130231,130232,130299,130301,130302,130399,130401, ///
+>     130402,139999,140101,140102,140103,140104,140105,149999,150101,150102,150103,150104,150105, ///
+>     150106,150199,150201,150202,150203,150204,150299,150301,150302,150399,150401,150402,150499, ///
+>     150501,150599,150601,150602,150699,150701,150799,150801,150899,159999,160101,160102,160103, ///
+>     160104,160105,160106,160107,160108,160199,160201,160299,169999,181201,181202,181203,181204, ///
+>     181205,181206,181299,181301,181302,181399,181401,181499,181501,181599,181601,181699, ///
+>     181801,181899,189999)
+(635,887 missing values generated)
+
+. 
+. foreach v of varlist personal_care_act housework_act financial_act tax_act childcare_act ///
+>                        adult_care_act market_work_act study_act leisure_act {
+  2.     replace `v' = 0 if `v' == .
+  3. }
+(572,740 real changes made)
+(646,578 real changes made)
+(832,163 real changes made)
+(836,138 real changes made)
+(783,669 real changes made)
+(835,076 real changes made)
+(781,250 real changes made)
+(838,058 real changes made)
+(635,887 real changes made)
+
+. 
+. *--- Aggregate time per activity category (BEFORE WBM filter, on ALL episodes) ---
+. foreach act in personal_care housework financial childcare adult_care ///
+>                market_work study leisure {
+  2.     generate `act'_time = duration if `act'_act == 1
+  3.     replace  `act'_time = 0 if `act'_time == .
+  4. }
+(572,740 missing values generated)
+(572,740 real changes made)
+(646,578 missing values generated)
+(646,578 real changes made)
+(832,163 missing values generated)
+(832,163 real changes made)
+(783,669 missing values generated)
+(783,669 real changes made)
+(835,076 missing values generated)
+(835,076 real changes made)
+(781,250 missing values generated)
+(781,250 real changes made)
+(838,058 missing values generated)
+(838,058 real changes made)
+(635,887 missing values generated)
+(635,887 real changes made)
+
+. 
+. sort caseid
+
+. foreach act in personal_care housework financial childcare adult_care ///
+>                market_work study leisure {
+  2.     by caseid: egen `act' = sum(`act'_time)
+  3. }
+
+. 
+. *--- NEW: narrow tax/insurance time, well-being sample (parity with STEP 2) ---
+. generate tax_time = duration if tax_act == 1
+(836,138 missing values generated)
+
+. replace  tax_time = 0 if tax_time == .
+(836,138 real changes made)
+
+. sort caseid
+
+. by caseid: egen tax = sum(tax_time)
+
+. label variable tax "Daily minutes: tax prep/filing + insurance claims (narrow outcome)"
+
+. 
+. generate total_time = personal_care + housework + financial + childcare + ///
+>                       adult_care + market_work + study + leisure
+
+. 
+. *--- Now filter to WBM-eligible episodes ---
+. keep if wbelig == 1
+(214,733 observations deleted)
+
+. drop if schappy > 6
+(511,004 observations deleted)
+
+. 
+. *--- Drop extreme well-being ratings ---
+. foreach v of varlist schappy scsad scpain sctired scstress meaning {
+  2.     capture drop if `v' > 6
+  3. }
+
+. 
+. *--- Wages ---
+. replace earnweek = . if earnweek == 0 | earnweek == 99999.99
+(143 real changes made, 143 to missing)
+
+. replace hourwage = . if hourwage == 0 | hourwage == 999.99
+(6 real changes made, 6 to missing)
+
+. gen wage = hourwage if hourwage != .
+(6 missing values generated)
+
+. replace wage = earnweek / uhrsworkt if wage == . & earnweek != .
+(6 real changes made)
+
+. 
+. drop if famincome > 16
+(1,533 observations deleted)
+
+. replace ageychild = 0 if ageychild > 17
+(66,159 real changes made)
+
+. generate age_2 = (age * age) / 100
+
+. drop if total_time < 1440
+(18,661 observations deleted)
+
+. replace wt06 = wt20 if wt06 == .
+(0 real changes made)
+
+. 
+. *--- DiD variables for well-being ---
+. *   Pre: 2010, 2012, 2013  |  Post: 2021
+. generate post_tcja = (year == 2021)
+
+. label variable post_tcja "=1 if year == 2021 (post-TCJA WBM wave)"
+
+. 
+. generate treatment_ind  = (famincome >= 12 & famincome <= 14)
+
+. generate treatment_high = (famincome >= 15)
+
+. generate did_ind  = treatment_ind  * post_tcja
+
+. generate did_high = treatment_high * post_tcja
+
+. label variable did_ind  "DiD: treatment_ind * post_tcja (WBM)"
+
+. label variable did_high "DiD: treatment_high * post_tcja (WBM)"
+
+. 
+. *--- Demographics (same as above) ---
+. generate working    = (empstat == 1)
+
+. generate full_time  = (fullpart == 1)
+
+. replace  full_time  = 0 if working == 0
+(0 real changes made)
+
+. generate educ_1 = (educ < 20)
+
+. generate educ_2 = (educ == 20 | educ == 21)
+
+. generate educ_3 = (educ > 21)
+
+. generate hispanic = 0 if hisp == 100
+(13,879 missing values generated)
+
+. replace  hispanic = 1 if hispanic == .
+(13,879 real changes made)
+
+. generate married = (marst == 1 | marst == 2)
+
+. replace  married = 0 if married == .
+(0 real changes made)
+
+. capture drop asian
+
+. generate white       = (race == 100)
+
+. generate black       = (race == 110)
+
+. generate indian      = (race == 120)
+
+. generate asian       = (race == 131)
+
+. generate pacific     = (race == 132)
+
+. generate other_races = (race >= 200 & race < 300)
+
+. foreach v of varlist white black indian asian pacific other_races {
+  2.     replace `v' = 0 if `v' == .
+  3. }
+(0 real changes made)
+(0 real changes made)
+(0 real changes made)
+(0 real changes made)
+(0 real changes made)
+(0 real changes made)
+
+. generate male           = (sex == 1)
+
+. replace  male           = 0 if sex == 2
+(0 real changes made)
+
+. replace  retired        = 0 if retired > 1
+(80,764 real changes made)
+
+. generate male_full_time = male * full_time
+
+. tab famincome, gen(famincome_)
+
+  famincome |      Freq.     Percent        Cum.
+------------+-----------------------------------
+          1 |      2,334        2.38        2.38
+          2 |      1,711        1.75        4.13
+          3 |      2,371        2.42        6.55
+          4 |      3,279        3.35        9.90
+          5 |      2,912        2.97       12.88
+          6 |      4,728        4.83       17.71
+          7 |      5,486        5.60       23.31
+          8 |      5,639        5.76       29.07
+          9 |      5,715        5.84       34.91
+         10 |      5,258        5.37       40.28
+         11 |      8,299        8.48       48.76
+         12 |      8,193        8.37       57.13
+         13 |     10,120       10.34       67.47
+         14 |     11,843       12.10       79.57
+         15 |     11,199       11.44       91.01
+         16 |      8,802        8.99      100.00
+------------+-----------------------------------
+      Total |     97,889      100.00
+
+. generate year_c = year - 2013
+
+. 
+. *--- Merge state treatment ---
+. rename statefip statefip_orig
+
+. gen statefip = statefip_orig
+
+. merge m:1 statefip using "Data/TCJA_State_Treatment.dta", ///
+>     keepusing(treat_intensity treat_quintile) ///
+>     keep(master match)
+
+    Result                      Number of obs
+    -----------------------------------------
+    Not matched                             0
+    Matched                            97,889  (_merge==3)
+    -----------------------------------------
+
+. drop _merge
+
+. 
+. generate did_state = treat_intensity * post_tcja
+
+. capture generate high_salt_state = (treat_quintile == 5)
+
+. generate did_salt  = high_salt_state * post_tcja
+
+. 
+. save "Data/TCJA_Financial_WellBeing.dta", replace
+file Data/TCJA_Financial_WellBeing.dta saved
+
+. di "TCJA_Financial_WellBeing.dta saved."
+TCJA_Financial_WellBeing.dta saved.
+
+. 
+. di ""
+
+
+. di "===================================================================="
+====================================================================
+
+. di "  Sample creation complete. Next: run Analysis_DiD_TCJA.do"
+  Sample creation complete. Next: run Analysis_DiD_TCJA.do
+
+. di "===================================================================="
+====================================================================
+
+. 
+end of do-file
+
+. 
+. do Dofiles/Analysis_DiD_TCJA.do
+
+. /*******************************************************************************
+> *
+> *  Analysis_DiD_TCJA.do
+> *
+> *  PURPOSE: Estimate causal effects of TCJA financial complexity reduction
+> *    on time use (H1, H3) and emotional well-being (H2, H3)
+> *
+> *  PAPER: "Causal Effects of Financial Complexity Shocks on Time Use and
+> *          Emotional Well-Being: Evidence from Tax Policy Changes (TCJA 2017)"
+> *
+> *  REQUIRES:
+> *    - Data/TCJA_Financial_Time.dta       (from Sample_Creation_TCJA.do)
+> *    - Data/TCJA_Financial_WellBeing.dta  (from Sample_Creation_TCJA.do)
+> *    - outreg2 package (ssc install outreg2)
+> *    - coefplot  package (ssc install coefplot)
+> *    - estout    package (ssc install estout)
+> *
+> *  EVENT-STUDY CONVENTION:
+> *    - Sample period: 2013-2023 (-5/+5 window around TCJA)
+> *    - t = 0  -> 2018 (TCJA effective Jan 1, 2018)
+> *    - Base   = t = -1 -> 2017 (omitted year in event study)
+> *    - 2020 omitted from event-study interactions (COVID confound)
+> *
+> *  STRUCTURE:
+> *    Part I     - Table 1: Summary statistics
+> *    Part II    - Table 2: Main DiD (H1: time in financial activities)
+> *    Part III   - Table 3: Event study / parallel trends test (Figure 1)
+> *    Part III-B - Table 9: Tax-season triple-diff  [NEW]
+> *    Part IV    - Table 4: DiD by gender (H3) (Figure 2a, 2b)
+> *    Part IV-B  - Table 10: Event studies for college+ and high-SALT subgroups [NEW]
+> *    Part V     - Table 5: Well-being DiD (H2)
+> *    Part VI    - Table 6: Heterogeneity by education, SALT exposure, gender
+> *    Part VII   - Table 7: Continuous DiD (state treatment intensity)
+> *    Part VIII  - Table 8: Robustness checks
+> *    Part VIII-B- Magnitude plausibility check & minimum detectable effect [NEW]
+> *    Part IX    - Figures (Figure 3 trends, Figure 4 by gender)
+> *
+> *  REVISION HISTORY (response to JEBO reviewer comments, Aug 2026):
+> *    - NEW Table2 cols (7)-(8): narrow tax/insurance outcome (Rev#2), and
+> *      pre-COVID-only post period 2013-2019 (Rev#1 pt.1b).
+> *    - NEW Part III-B / Table9: treatment x post x tax_season triple-diff,
+> *      on both the broad and narrow outcomes (Rev#1 pt.3, Rev#2 "tax
+> *      season" comment). Requires tax_season / did_x_season etc. from the
+> *      updated Sample_Creation_TCJA.do.
+> *    - NEW Part IV-B / Table10 + Figures 5-6: event studies + joint
+> *      pre-trend tests for the college-educated and high-SALT subgroups
+> *      (Rev#2: "we need to see parallel trends tests for the heterogeneous
+> *      effects that look significant").
+> *    - NEW Part VIII-B: minimum detectable effect (Rev#2 "statistical
+> *      power") and a data-driven implied-ATT/switcher magnitude check
+> *      against the IRS Tax Burden Survey benchmark (Rev#1 pt.4).
+> *    - See Sample_Creation_TCJA.do STEP 3 for a diagnostic block on the
+> *      "transition zone" sample-consistency issue (Rev#2 minor comment) -
+> *      resolve that BEFORE trusting Table 2 columns (1)-(2)/(4)-(6) here,
+> *      since they currently do NOT restrict to `in_did_sample==1`.
+> *
+> *  AUTHOR: [Your name]
+> *  LAST UPDATED: 2026
+> *
+> *******************************************************************************/
+. 
+. clear
+
+. set more off
+
+. capture ssc install outreg2
+
+. capture ssc install coefplot
+
+. capture ssc install estout
+
+. 
+. *--- Controls used throughout ---
+. global controls "male age age_2 full_time male_full_time educ_2 educ_3 hispanic married white black indian asian p
+> acific other_races retired hh_size hh_numkids ageychild i.famincome"
+
+. 
+. global controls_noinc "male age age_2 full_time male_full_time educ_2 educ_3 hispanic married white black indian a
+> sian pacific other_races retired hh_size hh_numkids ageychild"
+
+. 
+. 
+. *log using "Results/All_Results.log", replace
 . 
 . ********************************************************************************
 . ** PART I - SUMMARY STATISTICS (Table 1 & Table 1b)
@@ -17,16 +1370,17 @@
 . di "--- Panel A: Time use (minutes/day) ---"
 --- Panel A: Time use (minutes/day) ---
 
-. sum financial personal_care housework childcare adult_care market_work study leisure  [aw = wt06]
+. sum financial tax personal_care housework childcare adult_care market_work study leisure  [aw = wt06]
 
     Variable |     Obs      Weight        Mean   Std. dev.       Min        Max
 -------------+-----------------------------------------------------------------
    financial |  87,779  8.4447e+11    8.314909   34.71245          0        889
+         tax |  87,779  8.4447e+11    6.063588   30.06903          0        889
 personal_~re |  87,779  8.4447e+11    657.4566   155.8872          0       1440
    housework |  87,779  8.4447e+11    142.3016   154.7303          0       1365
    childcare |  87,779  8.4447e+11    31.26314   84.46532          0       1350
-  adult_care |  87,779  8.4447e+11    4.603625   24.95189          0       1020
 -------------+-----------------------------------------------------------------
+  adult_care |  87,779  8.4447e+11    4.603625   24.95189          0       1020
  market_work |  87,779  8.4447e+11    223.1003    279.082          0       1440
        study |  87,779  8.4447e+11    27.89801   111.0934          0       1345
      leisure |  87,779  8.4447e+11    345.0618   231.3973          0       1439
@@ -159,8 +1513,24 @@ personal_~re |  87,779  8.4447e+11    657.4566   155.8872          0       1440
 . use "Data/TCJA_Financial_Time.dta", clear
 
 . 
+. *--- IMPORTANT [confirmed by the Sample_Creation_TCJA.do STEP 3 diagnostic] ---
+. *   Columns (1),(2),(4),(5),(6) below do NOT restrict the sample to
+. *   treatment_ind==1 | control_group==1. Since STEP 2 only drops
+. *   famincome>16 (not the $35-50k transition zone or the $100k+ group),
+. *   "post_tcja"/"did_ind" in those columns are estimated against a
+. *   contaminated comparison group = control_group (famincome<=9, N=27,129)
+. *   PLUS the $35-50k transition zone (N=11,553) PLUS the $100k+ group
+. *   (N=22,272) - i.e. against everyone NOT in the $50-100k bracket, not
+. *   against the "rarely itemize" <$35k group the paper's text describes.
+. *   This is very likely the exact source of the Table 1 vs Table 3 N
+. *   mismatch Reviewer #2 flagged (87,779 vs 53,954): 53,954 = 26,825
+. *   (treated) + 27,129 (true control) is the CORRECT clean comparison, and
+. *   it is already what column (3) below computes. Column (3), NOT column
+. *   (2), is the specification consistent with the paper's stated design -
+. *   treat column (2) as a robustness check against a broader comparison
+. *   group, not as the preferred estimate, when revising the text.
 . 
-. *--- Column 1: Simple DiD, no controls ---
+. *--- Column 1: Simple DiD, no controls [vs ALL non-treated - see note above] ---
 . reg financial did_ind treatment_ind post_tcja i.year i.statefip ///
 >     [pw = wt06], robust cluster(statefip)
 (sum of wgt is 844,469,890,826.2)
@@ -251,13 +1621,14 @@ treatment_ind |   .9172118   .3721859     2.46   0.017     .1696543    1.664769
 . outreg2 using "Results/Table2_Main_DiD.xls", ///
 >     ctitle("(1) Simple DiD") ///
 >     keep(did_ind treatment_ind post_tcja) ///
->     addtext("Controls","No","State FE","Yes","Year FE","Yes") ///
+>     addtext("Controls","No","State FE","Yes","Year FE","Yes","Comparison","vs ALL non-treated (NOT clean control)"
+> ) ///
 >     bdec(3) se replace
 Results/Table2_Main_DiD.xls
 dir : seeout
 
 . 
-. *--- Column 2: With demographics ---
+. *--- Column 2: With demographics [vs ALL non-treated - see note above] ---
 . reg financial did_ind treatment_ind post_tcja $controls ///
 >     i.year i.statefip [pw = wt06], robust cluster(statefip)
 (sum of wgt is 844,469,890,826.2)
@@ -385,14 +1756,17 @@ male_full_time |   .8217996   .4843811     1.70   0.096    -.1511084    1.794708
 . outreg2 using "Results/Table2_Main_DiD.xls", ///
 >     ctitle("(2) With Controls") ///
 >     keep(did_ind treatment_ind post_tcja $controls) ///
->     addtext("Controls","Yes","State FE","Yes","Year FE","Yes") ///
+>     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Comparison","vs ALL non-treated (NOT clean control)
+> ") ///
 >     bdec(3) se append
 Results/Table2_Main_DiD.xls
 dir : seeout
 
 . 
 . *--- Column 3: Treatment = $50k-$100k vs. control = <$35k ---
-. *   (restrict to these two groups for clean comparison)
+. *   PREFERRED SPECIFICATION - the only column that restricts to the two
+. *   groups the paper's identification strategy actually describes
+. *   (excludes $35-50k transition zone AND $100k+ high income).
 . preserve
 
 . keep if treatment_ind == 1 | control_group == 1
@@ -521,7 +1895,8 @@ male_full_time |   1.343986   .6785815     1.98   0.053    -.0189848    2.706957
 . outreg2 using "Results/Table2_Main_DiD.xls", ///
 >     ctitle("(3) Clean Comparison") ///
 >     keep(did_ind treatment_ind post_tcja $controls) ///
->     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Sample","50-100k vs <35k") ///
+>     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Sample","50-100k vs <35k","Comparison","PREFERRED: 
+> clean treat vs true control") ///
 >     bdec(3) se append
 Results/Table2_Main_DiD.xls
 dir : seeout
@@ -936,6 +2311,427 @@ dir : seeout
 . restore
 
 . 
+. *--- Column 7 [NEW]: Narrow outcome - tax/insurance time only ---
+. *   Reviewer #2: higher-powered test using only the activity codes that
+. *   plausibly respond to the standard-deduction change (tax prep/filing +
+. *   insurance), instead of all financial management. Same sample/spec as
+. *   column (2).
+. reg tax did_ind treatment_ind post_tcja $controls ///
+>     i.year i.statefip [pw = wt06], robust cluster(statefip)
+(sum of wgt is 844,469,890,826.2)
+note: 14.famincome omitted because of collinearity.
+note: 2023.year omitted because of collinearity.
+
+Linear regression                               Number of obs     =     87,779
+                                                F(44, 50)         =          .
+                                                Prob > F          =          .
+                                                R-squared         =     0.0117
+                                                Root MSE          =     29.908
+
+                                (Std. err. adjusted for 51 clusters in statefip)
+--------------------------------------------------------------------------------
+               |               Robust
+           tax | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+       did_ind |  -.8880241   .4627591    -1.92   0.061    -1.817503    .0414548
+ treatment_ind |   1.664989   .9097851     1.83   0.073    -.1623683    3.492346
+     post_tcja |   .2400724    .640089     0.38   0.709    -1.045584    1.525729
+          male |  -2.470342   .3226672    -7.66   0.000    -3.118438   -1.822246
+           age |   .0999005   .0370576     2.70   0.010     .0254682    .1743328
+         age_2 |   -.083088   .0418918    -1.98   0.053    -.1672302    .0010542
+     full_time |  -3.146706   .3653398    -8.61   0.000    -3.880513     -2.4129
+male_full_time |   1.224243   .4237649     2.89   0.006     .3730862      2.0754
+        educ_2 |   .9358405   .3782405     2.47   0.017     .1761221    1.695559
+        educ_3 |    3.01658    .390117     7.73   0.000     2.233007    3.800153
+      hispanic |  -1.355959   .3101941    -4.37   0.000    -1.979003    -.732916
+       married |   .2801523   .2818068     0.99   0.325    -.2858734    .8461779
+         white |   4.393481   1.226594     3.58   0.001     1.929794    6.857168
+         black |   2.423873   1.359287     1.78   0.081    -.3063358    5.154083
+        indian |   2.967195   1.381001     2.15   0.037      .193372    5.741018
+         asian |   .9731849   1.194831     0.81   0.419    -1.426703    3.373073
+       pacific |   1.078545   1.602418     0.67   0.504    -2.140006    4.297096
+   other_races |   5.360333   1.723202     3.11   0.003     1.899179    8.821486
+       retired |   2.402032   .5807794     4.14   0.000     1.235503    3.568562
+       hh_size |  -.4926798   .1353761    -3.64   0.001    -.7645907   -.2207689
+    hh_numkids |   .5251533   .1874291     2.80   0.007     .1486909    .9016157
+     ageychild |  -.0204513   .0283288    -0.72   0.474    -.0773514    .0364488
+               |
+     famincome |
+            2  |  -.7797702   1.037239    -0.75   0.456    -2.863125    1.303585
+            3  |  -1.238634   .8934972    -1.39   0.172    -3.033276    .5560079
+            4  |  -.8666797   .9953509    -0.87   0.388    -2.865901    1.132541
+            5  |  -1.085528   .9426457    -1.15   0.255    -2.978888    .8078312
+            6  |  -1.312598   1.002784    -1.31   0.197    -3.326749    .7015526
+            7  |  -.8110454   .8384325    -0.97   0.338    -2.495087    .8729958
+            8  |   .2621503   .9896366     0.26   0.792    -1.725593    2.249894
+            9  |   .1634562   .9067336     0.18   0.858    -1.657772    1.984684
+           10  |  -.4363058   .9166884    -0.48   0.636    -2.277529    1.404917
+           11  |   .1655908   .8309763     0.20   0.843    -1.503474    1.834656
+           12  |  -.7149283   .5680824    -1.26   0.214    -1.855955    .4260987
+           13  |  -.6405193   .3659501    -1.75   0.086    -1.375552    .0945132
+           14  |          0  (omitted)
+           15  |   1.376427   .8366556     1.65   0.106    -.3040454    3.056899
+           16  |   1.803395   .9841604     1.83   0.073    -.1733491     3.78014
+               |
+          year |
+         2014  |  -.9853223   .4578951    -2.15   0.036    -1.905032    -.065613
+         2015  |   .2258265   .4696811     0.48   0.633    -.7175557    1.169209
+         2016  |   .0780304   .4524097     0.17   0.864    -.8306612     .986722
+         2017  |  -.4873853   .4594231    -1.06   0.294    -1.410164    .4353932
+         2018  |  -.2244281   .5566626    -0.40   0.689    -1.342518    .8936617
+         2019  |   .8905307   .6038901     1.47   0.147    -.3224183     2.10348
+         2020  |  -.2923667   .4560084    -0.64   0.524    -1.208287    .6235531
+         2021  |   .1633229   .6258989     0.26   0.795    -1.093832    1.420478
+         2022  |   .5839765   .8110395     0.72   0.475    -1.045044    2.212997
+         2023  |          0  (omitted)
+               |
+      statefip |
+            2  |   9.095596   .2055935    44.24   0.000      8.68265    9.508543
+            4  |   1.665138   .1177686    14.14   0.000     1.428592    1.901683
+            5  |   1.265737    .064266    19.70   0.000     1.136654    1.394819
+            6  |   2.552322   .1558118    16.38   0.000     2.239365    2.865279
+            8  |   1.843472   .1011468    18.23   0.000     1.640312    2.046631
+            9  |   1.796867   .0981428    18.31   0.000     1.599742    1.993993
+           10  |   .3775858   .0692824     5.45   0.000      .238428    .5167437
+           11  |   .2940906   .1757996     1.67   0.101    -.0590133    .6471945
+           12  |   .9647214   .0807333    11.95   0.000     .8025639    1.126879
+           13  |   1.533018   .0518416    29.57   0.000     1.428891    1.637145
+           15  |    .900404    .365935     2.46   0.017     .1654019    1.635406
+           16  |   2.174518   .0903456    24.07   0.000     1.993053    2.355982
+           17  |  -.0411775   .0748663    -0.55   0.585    -.1915509    .1091959
+           18  |   .7268226   .0681282    10.67   0.000      .589983    .8636622
+           19  |   .5826841   .0938873     6.21   0.000      .394106    .7712622
+           20  |   .4764484   .0687988     6.93   0.000     .3382618    .6146349
+           21  |   .9363263   .0601942    15.56   0.000     .8154226     1.05723
+           22  |   1.446465   .0448492    32.25   0.000     1.356382    1.536547
+           23  |   3.381599   .0858526    39.39   0.000     3.209159    3.554039
+           24  |    1.04703   .0909428    11.51   0.000     .8643662    1.229694
+           25  |   .7541096   .0953147     7.91   0.000     .5626643    .9455548
+           26  |    1.59311   .0600167    26.54   0.000     1.472563    1.713658
+           27  |   1.697486   .0877072    19.35   0.000     1.521321    1.873651
+           28  |   -.350486   .0704291    -4.98   0.000     -.491947    -.209025
+           29  |  -.1012612    .070217    -1.44   0.156    -.2422961    .0397737
+           30  |   2.902138   .1000656    29.00   0.000     2.701151    3.103126
+           31  |   .7968352   .0814291     9.79   0.000       .63328    .9603904
+           32  |    3.04706   .1052673    28.95   0.000     2.835624    3.258496
+           33  |   -.632621   .0884738    -7.15   0.000    -.8103257   -.4549162
+           34  |   .2520159   .1058997     2.38   0.021     .0393101    .4647216
+           35  |   .6621509   .1459741     4.54   0.000     .3689533    .9553484
+           36  |   1.171285   .0822851    14.23   0.000      1.00601    1.336559
+           37  |   .8097998   .0417662    19.39   0.000     .7259099    .8936898
+           38  |   8.939967   .1197798    74.64   0.000     8.699382    9.180552
+           39  |   .6200019   .0598387    10.36   0.000     .4998124    .7401914
+           40  |   .8243673     .10231     8.06   0.000     .6188717    1.029863
+           41  |   2.056499   .0908106    22.65   0.000       1.8741    2.238897
+           42  |   .6234671   .0600849    10.38   0.000      .502783    .7441511
+           44  |   .1795119   .0710307     2.53   0.015     .0368426    .3221812
+           45  |   .7604318    .037363    20.35   0.000     .6853861    .8354775
+           46  |   .3319082   .0926402     3.58   0.001      .145835    .5179814
+           47  |   .3094877   .0498453     6.21   0.000     .2093704    .4096049
+           48  |   1.316667   .1245026    10.58   0.000     1.066596    1.566738
+           49  |   1.016536   .1093485     9.30   0.000     .7969035    1.236169
+           50  |   3.602953   .1160835    31.04   0.000     3.369793    3.836114
+           51  |     1.4032   .0660291    21.25   0.000     1.270577    1.535823
+           53  |   4.071597   .1007732    40.40   0.000     3.869188    4.274006
+           54  |   .5490387   .1061136     5.17   0.000     .3359032    .7621742
+           55  |   1.630691   .0780659    20.89   0.000     1.473891    1.787491
+           56  |   1.802085   .1013571    17.78   0.000     1.598503    2.005667
+               |
+         _cons |  -1.077911   1.582756    -0.68   0.499    -4.256969    2.101147
+--------------------------------------------------------------------------------
+
+. outreg2 using "Results/Table2_Main_DiD.xls", ///
+>     ctitle("(7) Narrow: Tax Time") ///
+>     keep(did_ind treatment_ind post_tcja $controls) ///
+>     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Outcome","Tax/insurance minutes only") ///
+>     bdec(3) se append
+Results/Table2_Main_DiD.xls
+dir : seeout
+
+. 
+. *--- Column 8 [NEW]: Pre-COVID post period only (2013-2019) ---
+. *   Reviewer #1 pt.1b: the post-period overlaps COVID; excluding 2020 alone
+. *   (column 6) still leaves 2021-2023 (pandemic-adjacent recovery years) in
+. *   the post period. This restricts to a "clean" pre-COVID post window.
+. preserve
+
+. keep if year <= 2019
+(28,257 observations deleted)
+
+. reg financial did_ind treatment_ind post_tcja $controls ///
+>     i.year i.statefip [pw = wt06], robust cluster(statefip)
+(sum of wgt is 533,707,771,645.2)
+note: 14.famincome omitted because of collinearity.
+note: 2019.year omitted because of collinearity.
+
+Linear regression                               Number of obs     =     59,522
+                                                F(40, 50)         =          .
+                                                Prob > F          =          .
+                                                R-squared         =     0.0212
+                                                Root MSE          =     33.556
+
+                                (Std. err. adjusted for 51 clusters in statefip)
+--------------------------------------------------------------------------------
+               |               Robust
+     financial | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+       did_ind |  -.8764534   .7434003    -1.18   0.244    -2.369617    .6167101
+ treatment_ind |   2.827027   1.102987     2.56   0.013     .6116117    5.042442
+     post_tcja |   1.267015   .7601266     1.67   0.102    -.2597446    2.793774
+          male |  -2.222961   .5545711    -4.01   0.000     -3.33685   -1.109072
+           age |    .087025   .0595746     1.46   0.150    -.0326341    .2066842
+         age_2 |  -.0135615   .0672136    -0.20   0.841    -.1485639    .1214409
+     full_time |  -4.282579    .447604    -9.57   0.000    -5.181618    -3.38354
+male_full_time |   1.043494   .6474929     1.61   0.113    -.2570339    2.344021
+        educ_2 |   2.317147   .5769967     4.02   0.000     1.158215    3.476078
+        educ_3 |    5.12678   .6638055     7.72   0.000     3.793487    6.460072
+      hispanic |  -2.032452   .3802286    -5.35   0.000    -2.796164   -1.268741
+       married |   .6616286   .3986262     1.66   0.103    -.1390358    1.462293
+         white |    3.40678   2.782346     1.22   0.227    -2.181726    8.995285
+         black |   1.229037   2.907827     0.42   0.674    -4.611505     7.06958
+        indian |   .9452349   3.030714     0.31   0.756    -5.142134    7.032604
+         asian |   -1.30998   2.751272    -0.48   0.636    -6.836073    4.216114
+       pacific |  -.1027226    2.84828    -0.04   0.971    -5.823661    5.618216
+   other_races |   4.813032   3.220353     1.49   0.141    -1.655236     11.2813
+       retired |   3.407598   .8639183     3.94   0.000     1.672367    5.142829
+       hh_size |  -.5870116   .2337674    -2.51   0.015    -1.056547    -.117476
+    hh_numkids |   .6451631   .2687697     2.40   0.020     .1053233    1.185003
+     ageychild |  -.0262946   .0310001    -0.85   0.400    -.0885601    .0359708
+               |
+     famincome |
+            2  |  -1.172839    1.46473    -0.80   0.427    -4.114835    1.769158
+            3  |  -1.035318   1.214677    -0.85   0.398    -3.475068    1.404432
+            4  |  -.9952723   1.223819    -0.81   0.420    -3.453386    1.462841
+            5  |  -1.016153   1.445672    -0.70   0.485     -3.91987    1.887564
+            6  |  -.6131451   1.243278    -0.49   0.624    -3.110343    1.884053
+            7  |   .0197887    1.15979     0.02   0.986    -2.309718    2.349296
+            8  |   .8446018   1.371098     0.62   0.541     -1.90933    3.598533
+            9  |   1.450677    1.03871     1.40   0.169    -.6356334    3.536987
+           10  |   .5153232   1.249065     0.41   0.682    -1.993497    3.024144
+           11  |   .8464782   .9882024     0.86   0.396    -1.138385    2.831341
+           12  |  -1.897028   .6434949    -2.95   0.005    -3.189526   -.6045309
+           13  |  -.5616621   .4869574    -1.15   0.254    -1.539745    .4164207
+           14  |          0  (omitted)
+           15  |   2.436827   1.134258     2.15   0.037     .1586025    4.715052
+           16  |   2.866131   1.122969     2.55   0.014     .6105819    5.121681
+               |
+          year |
+         2014  |  -.7220673   .5352553    -1.35   0.183    -1.797159    .3530247
+         2015  |    .453798   .5652601     0.80   0.426    -.6815603    1.589156
+         2016  |   .4021969   .6695025     0.60   0.551    -.9425384    1.746932
+         2017  |  -.6645054   .5681397    -1.17   0.248    -1.805648    .4766369
+         2018  |  -1.117772   .6198358    -1.80   0.077    -2.362749    .1272047
+         2019  |          0  (omitted)
+               |
+      statefip |
+            2  |   9.852648   .3787685    26.01   0.000     9.091869    10.61343
+            4  |   .5126195    .152988     3.35   0.002     .2053342    .8199049
+            5  |   -.746788   .1046275    -7.14   0.000    -.9569385   -.5366376
+            6  |     2.9495    .216228    13.64   0.000     2.515193    3.383807
+            8  |   1.041685   .1368671     7.61   0.000     .7667794    1.316591
+            9  |   .6696856   .1574222     4.25   0.000     .3534938    .9858775
+           10  |  -1.980676   .1191652   -16.62   0.000    -2.220027   -1.741326
+           11  |   .8848453   .2041955     4.33   0.000     .4747065    1.294984
+           12  |  -.4930136   .1088701    -4.53   0.000    -.7116856   -.2743417
+           13  |   .0934299   .0702489     1.33   0.190    -.0476692    .2345291
+           15  |   .1493802   .4751806     0.31   0.755    -.8050482    1.103809
+           16  |   2.091247   .1286603    16.25   0.000     1.832826    2.349669
+           17  |   -.877291   .1069493    -8.20   0.000    -1.092105   -.6624769
+           18  |  -1.412476   .0848315   -16.65   0.000    -1.582865   -1.242087
+           19  |   1.012325   .1131139     8.95   0.000      .785129    1.239521
+           20  |    .543158    .122026     4.45   0.000     .2980615    .7882545
+           21  |  -1.294665   .0886764   -14.60   0.000    -1.472777   -1.116553
+           22  |  -.7033528   .0652233   -10.78   0.000    -.8343576    -.572348
+           23  |   4.867317   .1202146    40.49   0.000     4.625859    5.108775
+           24  |  -.8836829   .1184649    -7.46   0.000    -1.121627   -.6457392
+           25  |   1.140615   .1457683     7.82   0.000     .8478313      1.4334
+           26  |   1.342809   .0857968    15.65   0.000     1.170481    1.515137
+           27  |   .2560781   .1237254     2.07   0.044     .0075683    .5045879
+           28  |  -1.636165   .1005909   -16.27   0.000    -1.838207   -1.434122
+           29  |  -3.070258   .0775376   -39.60   0.000    -3.225997   -2.914519
+           30  |   .5308863   .1263289     4.20   0.000     .2771472    .7846254
+           31  |  -2.212116   .1070766   -20.66   0.000    -2.427185   -1.997046
+           32  |   2.635764   .1681258    15.68   0.000     2.298073    2.973455
+           33  |  -.5570852   .1308572    -4.26   0.000    -.8199196   -.2942509
+           34  |  -.2001539   .1453979    -1.38   0.175    -.4921942    .0918864
+           35  |   4.193801   .2046391    20.49   0.000     3.782771    4.604831
+           36  |    .739211   .1061085     6.97   0.000     .5260857    .9523362
+           37  |  -.9709757   .0744795   -13.04   0.000    -1.120572   -.8213792
+           38  |   1.520253   .1583396     9.60   0.000     1.202218    1.838287
+           39  |     .14217   .0788405     1.80   0.077    -.0161858    .3005257
+           40  |   1.119017   .1598469     7.00   0.000     .7979555    1.440079
+           41  |   .2401552   .1334671     1.80   0.078    -.0279214    .5082318
+           42  |   .0778112   .0866346     0.90   0.373    -.0961996     .251822
+           44  |  -2.111495   .1326841   -15.91   0.000    -2.377999   -1.844991
+           45  |  -1.824724   .0652844   -27.95   0.000    -1.955852   -1.693597
+           46  |   2.171697   .1595951    13.61   0.000     1.851141    2.492253
+           47  |   .0658016   .0642405     1.02   0.311    -.0632292    .1948324
+           48  |   .7463777   .1799691     4.15   0.000     .3848992    1.107856
+           49  |  -1.719806   .1920857    -8.95   0.000    -2.105621    -1.33399
+           50  |  -2.050835   .1505374   -13.62   0.000    -2.353198   -1.748472
+           51  |   .3632523   .0943583     3.85   0.000     .1737281    .5527765
+           53  |   4.161384   .1381477    30.12   0.000     3.883906    4.438862
+           54  |  -.2135314   .1000632    -2.13   0.038    -.4145143   -.0125484
+           55  |   .1100772   .1068952     1.03   0.308     -.104628    .3247825
+           56  |   -2.07534   .1533943   -13.53   0.000    -2.383441   -1.767239
+               |
+         _cons |   -.035224   2.882645    -0.01   0.990    -5.825187    5.754739
+--------------------------------------------------------------------------------
+
+. outreg2 using "Results/Table2_Main_DiD.xls", ///
+>     ctitle("(8) Pre-COVID Post Only") ///
+>     keep(did_ind treatment_ind post_tcja $controls) ///
+>     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Sample","2013-2019 only") ///
+>     bdec(3) se append
+Results/Table2_Main_DiD.xls
+dir : seeout
+
+. restore
+
+. 
+. *--- Column 9 [NEW]: Narrow outcome (tax) x clean comparison sample ---
+. *   Combines Reviewer #2's narrow-outcome suggestion (col 7) with the
+. *   correct treat-vs-true-control sample restriction (col 3) - this is
+. *   the specification the paper should probably lead with going forward,
+. *   since it addresses both the identification concern AND the power
+. *   concern in one shot.
+. preserve
+
+. keep if treatment_ind == 1 | control_group == 1
+(33,825 observations deleted)
+
+. reg tax did_ind treatment_ind post_tcja $controls ///
+>     i.year i.statefip [pw = wt06], robust cluster(statefip)
+(sum of wgt is 495,599,925,490.9)
+note: 14.famincome omitted because of collinearity.
+note: 2023.year omitted because of collinearity.
+
+Linear regression                               Number of obs     =     53,954
+                                                F(40, 50)         =          .
+                                                Prob > F          =          .
+                                                R-squared         =     0.0124
+                                                Root MSE          =     29.026
+
+                                (Std. err. adjusted for 51 clusters in statefip)
+--------------------------------------------------------------------------------
+               |               Robust
+           tax | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+       did_ind |  -.1629331   .4829268    -0.34   0.737     -1.13292     .807054
+ treatment_ind |   1.012523   .9137658     1.11   0.273    -.8228292    2.847876
+     post_tcja |  -.9731866   .7018646    -1.39   0.172    -2.382923      .43655
+          male |  -2.652454   .3768546    -7.04   0.000    -3.409389    -1.89552
+           age |   .0457846   .0621764     0.74   0.465    -.0791004    .1706695
+         age_2 |  -.0197517   .0679838    -0.29   0.773    -.1563012    .1167978
+     full_time |  -2.524914   .5567618    -4.53   0.000    -3.643203   -1.406625
+male_full_time |   1.741965   .5365898     3.25   0.002     .6641929    2.819737
+        educ_2 |   .9695346   .5956439     1.63   0.110    -.2268514    2.165921
+        educ_3 |   2.808145   .6018611     4.67   0.000     1.599272    4.017019
+      hispanic |  -1.888096   .4277081    -4.41   0.000    -2.747173   -1.029019
+       married |   .3871094   .2917642     1.33   0.191    -.1989162    .9731351
+         white |   3.469488   1.177918     2.95   0.005      1.10357    5.835405
+         black |    1.68498   1.267505     1.33   0.190    -.8608777    4.230838
+        indian |   2.189063   1.472309     1.49   0.143    -.7681572    5.146284
+         asian |   .7397137   1.212568     0.61   0.545    -1.695802    3.175229
+       pacific |   1.191275    2.47117     0.48   0.632    -3.772216    6.154766
+   other_races |   4.648235   2.015537     2.31   0.025     .5999102    8.696559
+       retired |   2.099852   .6193305     3.39   0.001     .8558905    3.343814
+       hh_size |  -.6319689   .1288783    -4.90   0.000    -.8908286   -.3731092
+    hh_numkids |   .7289852   .1821725     4.00   0.000      .363081    1.094889
+     ageychild |  -.0025982   .0319848    -0.08   0.936    -.0668415    .0616452
+               |
+     famincome |
+            2  |  -.8228998   1.053147    -0.78   0.438    -2.938208    1.292408
+            3  |  -1.205708   .8997903    -1.34   0.186     -3.01299    .6015744
+            4  |  -.9161756   1.002652    -0.91   0.365    -2.930061     1.09771
+            5  |  -1.162816   .9369005    -1.24   0.220    -3.044636    .7190042
+            6  |  -1.388871   1.016322    -1.37   0.178    -3.430214    .6524727
+            7  |  -.9015168   .8646914    -1.04   0.302    -2.638301     .835267
+            8  |   .1201612    1.00496     0.12   0.905     -1.89836    2.138682
+            9  |  -.0002571    .902572    -0.00   1.000    -1.813126    1.812612
+           12  |  -.6307151   .5612149    -1.12   0.266    -1.757948    .4965182
+           13  |  -.5943717   .3600523    -1.65   0.105    -1.317558    .1288147
+           14  |          0  (omitted)
+               |
+          year |
+         2014  |  -1.741582    .548726    -3.17   0.003     -2.84373   -.6394334
+         2015  |  -.4856493   .5961075    -0.81   0.419    -1.682967    .7116679
+         2016  |  -.2099249    .643273    -0.33   0.746    -1.501977    1.082127
+         2017  |  -1.167402   .4808767    -2.43   0.019    -2.133271   -.2015326
+         2018  |   -.392382   .5537101    -0.71   0.482    -1.504541    .7197774
+         2019  |   .8937707   .6259638     1.43   0.160    -.3635146    2.151056
+         2020  |   .0355494   .6871342     0.05   0.959      -1.3446    1.415699
+         2021  |   .5589347   .8134066     0.69   0.495    -1.074841     2.19271
+         2022  |   .2620759   .8297889     0.32   0.753    -1.404604    1.928756
+         2023  |          0  (omitted)
+               |
+      statefip |
+            2  |   1.826879   .2897839     6.30   0.000     1.244831    2.408927
+            4  |   1.910169   .1922696     9.93   0.000     1.523984    2.296354
+            5  |   1.468234   .0671947    21.85   0.000     1.333269    1.603198
+            6  |   2.813429    .248962    11.30   0.000     2.313374    3.313484
+            8  |   2.715154   .1257022    21.60   0.000     2.462674    2.967635
+            9  |   2.964479   .1373895    21.58   0.000     2.688524    3.240434
+           10  |  -2.918892   .1031175   -28.31   0.000     -3.12601   -2.711774
+           11  |  -.9263971   .2277453    -4.07   0.000    -1.383837   -.4689573
+           12  |    .423539   .1246632     3.40   0.001     .1731456    .6739323
+           13  |   1.426431   .0598299    23.84   0.000     1.306259    1.546603
+           15  |  -.6010758   .4301082    -1.40   0.168    -1.464974     .262822
+           16  |   2.583671   .1134714    22.77   0.000     2.355757    2.811585
+           17  |  -.1095159   .1049883    -1.04   0.302     -.320391    .1013592
+           18  |   .6082406   .1010313     6.02   0.000     .4053132     .811168
+           19  |    1.29494   .1321528     9.80   0.000     1.029503    1.560377
+           20  |   .0320912   .1043034     0.31   0.760    -.1774083    .2415907
+           21  |   .6197119   .0806127     7.69   0.000     .4577965    .7816272
+           22  |   1.126561   .0541105    20.82   0.000     1.017877    1.235245
+           23  |   .4330156   .1342906     3.22   0.002     .1632849    .7027463
+           24  |    1.06938    .102087    10.48   0.000     .8643327    1.274428
+           25  |   .4655654   .1218383     3.82   0.000     .2208461    .7102848
+           26  |   .7043736   .0734295     9.59   0.000     .5568861     .851861
+           27  |   1.342889   .1377938     9.75   0.000     1.066122    1.619656
+           28  |  -.5412483   .0861325    -6.28   0.000    -.7142505    -.368246
+           29  |  -.0996558   .1074358    -0.93   0.358     -.315447    .1161354
+           30  |   2.468012   .1279492    19.29   0.000     2.211019    2.725006
+           31  |   -.797154   .1142179    -6.98   0.000    -1.026567   -.5677405
+           32  |    4.82988    .155594    31.04   0.000      4.51736      5.1424
+           33  |  -.8527282   .1243962    -6.85   0.000    -1.102585    -.602871
+           34  |   .2706744   .1390365     1.95   0.057    -.0085887    .5499375
+           35  |   .4060855   .2533845     1.60   0.115    -.1028524    .9150233
+           36  |   .3060801   .1302886     2.35   0.023     .0443877    .5677725
+           37  |   .5285035   .0612744     8.63   0.000     .4054301    .6515768
+           38  |   15.42828   .1616355    95.45   0.000     15.10363    15.75294
+           39  |  -.6364018   .0770875    -8.26   0.000    -.7912367    -.481567
+           40  |   .9852612   .1309702     7.52   0.000     .7221997    1.248323
+           41  |   1.647143   .1322086    12.46   0.000     1.381594    1.912692
+           42  |   .7801867   .1004942     7.76   0.000     .5783382    .9820353
+           44  |   1.332648   .1275314    10.45   0.000     1.076494    1.588802
+           45  |   .4925293   .0549307     8.97   0.000     .3821977    .6028609
+           46  |   1.572005   .1297354    12.12   0.000     1.311424    1.832586
+           47  |  -.6880532   .0833557    -8.25   0.000    -.8554781   -.5206283
+           48  |   1.412336   .2178407     6.48   0.000     .9747903    1.849882
+           49  |   .2898821   .1581251     1.83   0.073    -.0277215    .6074857
+           50  |  -1.426665    .175115    -8.15   0.000    -1.778394   -1.074936
+           51  |   1.729581    .088818    19.47   0.000     1.551185    1.907977
+           53  |   3.515424   .1485756    23.66   0.000     3.217001    3.813846
+           54  |  -1.716744   .1267086   -13.55   0.000    -1.971246   -1.462243
+           55  |   1.956146    .099117    19.74   0.000     1.757064    2.155228
+           56  |  -1.369412   .1366546   -10.02   0.000    -1.643891   -1.094933
+               |
+         _cons |   1.999357   1.659397     1.20   0.234    -1.333639    5.332354
+--------------------------------------------------------------------------------
+
+. outreg2 using "Results/Table2_Main_DiD.xls", ///
+>     ctitle("(9) Narrow Tax x Clean Sample") ///
+>     keep(did_ind treatment_ind post_tcja $controls) ///
+>     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Sample","50-100k vs <35k","Outcome","Tax/insurance 
+> minutes only","Comparison","PREFERRED sample + narrow outcome") ///
+>     bdec(3) se append
+Results/Table2_Main_DiD.xls
+dir : seeout
+
+. restore
+
+. 
 . 
 . 
 . ********************************************************************************
@@ -1159,6 +2955,697 @@ dir : seeout
 
 . graph export "Results/Figure1_EventStudy.png", replace width(2400)
 file Results/Figure1_EventStudy.png saved as PNG format
+
+. 
+. 
+. ********************************************************************************
+. ** PART III-B [NEW] - TAX SEASON TRIPLE-DIFF (Table 9)
+. ********************************************************************************
+. **  Reviewer #1 (pt.3) and Reviewer #2 both suggest exploiting within-year
+. **  timing: the standard-deduction change should only plausibly affect time
+. **  use during the filing season (~Jan-Apr), not the full calendar year.
+. **  This estimates treatment x post x tax_season, on both the broad outcome
+. **  (financial) and the narrow outcome (tax), so the paper can report
+. **  whether the effect concentrates where the mechanism predicts it should.
+. **  Requires tax_season / treat_x_season / post_x_season / did_x_season
+. **  from the updated Sample_Creation_TCJA.do (STEP 3) - re-run that script
+. **  first if these variables are missing.
+. ********************************************************************************
+. 
+. use "Data/TCJA_Financial_Time.dta", clear
+
+. 
+. capture confirm variable did_x_season
+
+. if _rc != 0 {
+.     di as error "ERROR: did_x_season not found - re-run the updated"
+.     di as error "Sample_Creation_TCJA.do (STEP 3) before this section."
+.     exit 111
+. }
+
+. 
+. *--- (1) Broad outcome (all financial management), triple-diff ---
+. reg financial did_ind did_x_season treatment_ind post_tcja tax_season ///
+>     treat_x_season post_x_season $controls i.year i.statefip ///
+>     [pw = wt06], robust cluster(statefip)
+(sum of wgt is 844,469,890,826.2)
+note: 14.famincome omitted because of collinearity.
+note: 2023.year omitted because of collinearity.
+
+Linear regression                               Number of obs     =     87,779
+                                                F(48, 50)         =          .
+                                                Prob > F          =          .
+                                                R-squared         =     0.0192
+                                                Root MSE          =     34.397
+
+                                (Std. err. adjusted for 51 clusters in statefip)
+--------------------------------------------------------------------------------
+               |               Robust
+     financial | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+       did_ind |  -.3090158   .6874232    -0.45   0.655    -1.689746    1.071714
+  did_x_season |  -.6390373   1.144352    -0.56   0.579    -2.937536    1.659461
+ treatment_ind |   3.589222   .9679388     3.71   0.001      1.64506    5.533384
+     post_tcja |  -.2467323   .7675339    -0.32   0.749    -1.788369    1.294905
+    tax_season |   .7968454   .5220982     1.53   0.133    -.2518197    1.845511
+treat_x_season |   -1.10924   .7087555    -1.57   0.124    -2.532817    .3143374
+ post_x_season |  -.4616166    .757523    -0.61   0.545    -1.983146    1.059913
+          male |  -2.134854   .4232431    -5.04   0.000    -2.984963   -1.284745
+           age |   .1503191   .0538714     2.79   0.007     .0421151    .2585231
+         age_2 |  -.0747043    .061751    -1.21   0.232    -.1987349    .0493263
+     full_time |  -4.304972   .4415101    -9.75   0.000    -5.191772   -3.418173
+male_full_time |   .8307362   .4835186     1.72   0.092    -.1404395    1.801912
+        educ_2 |   1.568749   .4090345     3.84   0.000      .747179    2.390319
+        educ_3 |   4.705011   .4482272    10.50   0.000      3.80472    5.605302
+      hispanic |  -1.497107   .3431068    -4.36   0.000    -2.186257   -.8079566
+       married |   .3324296   .3849641     0.86   0.392    -.4407934    1.105653
+         white |   5.280912    1.69215     3.12   0.003      1.88213    8.679694
+         black |   2.902153   1.832351     1.58   0.120    -.7782322    6.582539
+        indian |   2.801258   1.794341     1.56   0.125    -.8027826    6.405299
+         asian |   .8298858   1.646399     0.50   0.616    -2.477005    4.136776
+       pacific |   1.304801   2.209142     0.59   0.557    -3.132391    5.741993
+   other_races |   6.732714    2.04431     3.29   0.002     2.626597    10.83883
+       retired |   3.044851   .8159301     3.73   0.000     1.406007    4.683695
+       hh_size |  -.4985256   .1748512    -2.85   0.006    -.8497245   -.1473267
+    hh_numkids |   .5188371   .2269747     2.29   0.027      .062945    .9747292
+     ageychild |  -.0358538    .031216    -1.15   0.256     -.098553    .0268454
+               |
+     famincome |
+            2  |   -.287746   1.218819    -0.24   0.814    -2.735816    2.160324
+            3  |  -.8114914   1.000987    -0.81   0.421    -2.822032    1.199049
+            4  |  -.8556011   1.103877    -0.78   0.442    -3.072803    1.361601
+            5  |  -1.032362   1.130688    -0.91   0.366    -3.303415    1.238692
+            6  |  -.6023308    1.11485    -0.54   0.591    -2.841573    1.636911
+            7  |   .0315837   .9895061     0.03   0.975    -1.955898    2.019065
+            8  |   1.180241   1.143832     1.03   0.307    -1.117213    3.477695
+            9  |   .9696202   .9358002     1.04   0.305    -.9099897     2.84923
+           10  |   .7502627   1.038408     0.72   0.473    -1.335442    2.835967
+           11  |   1.374024   .8521065     1.61   0.113    -.3374821     3.08553
+           12  |  -1.321668   .5796168    -2.28   0.027    -2.485862   -.1574731
+           13  |  -1.073832   .3535561    -3.04   0.004     -1.78397   -.3636935
+           14  |          0  (omitted)
+           15  |   3.054204   .9209475     3.32   0.002     1.204427    4.903982
+           16  |    3.70232   .9667306     3.83   0.000     1.760584    5.644055
+               |
+          year |
+         2014  |  -.7189011   .5356419    -1.34   0.186    -1.794769    .3569672
+         2015  |   .3851423     .55968     0.69   0.495     -.739008    1.509293
+         2016  |    .366287   .6596077     0.56   0.581    -.9585741    1.691148
+         2017  |  -.6793949    .562694    -1.21   0.233    -1.809599    .4508094
+         2018  |    .389959   .6004358     0.65   0.519    -.8160518     1.59597
+         2019  |   1.483522   .5911833     2.51   0.015     .2960959    2.670949
+         2020  |   .2396977   .6482381     0.37   0.713    -1.062327    1.541722
+         2021  |   .8056112   .8575031     0.94   0.352    -.9167344    2.527957
+         2022  |   .6557349   .8183357     0.80   0.427    -.9879407     2.29941
+         2023  |          0  (omitted)
+               |
+      statefip |
+            2  |   8.033354   .2634822    30.49   0.000     7.504134    8.562573
+            4  |   1.830161   .1358536    13.47   0.000      1.55729    2.103031
+            5  |    .799683   .0671357    11.91   0.000      .664837    .9345291
+            6  |   2.783591   .1765901    15.76   0.000     2.428899    3.138282
+            8  |    1.53033   .1016661    15.05   0.000     1.326128    1.734532
+            9  |   2.096175   .0937278    22.36   0.000     1.907917    2.284432
+           10  |   .6653023   .0716548     9.28   0.000     .5213794    .8092253
+           11  |  -.6653175   .2048024    -3.25   0.002    -1.076675   -.2539597
+           12  |   .4073343   .0906039     4.50   0.000      .225351    .5893175
+           13  |    1.62872   .0539448    30.19   0.000     1.520369    1.737072
+           15  |   4.700148   .4122181    11.40   0.000     3.872184    5.528113
+           16  |   2.344196   .1208389    19.40   0.000     2.101484    2.586909
+           17  |  -.3300561   .0791225    -4.17   0.000    -.4889782   -.1711339
+           18  |   1.115396   .0845207    13.20   0.000     .9456311    1.285161
+           19  |   1.235575   .1033058    11.96   0.000     1.028079    1.443071
+           20  |  -.1737837   .0724828    -2.40   0.020    -.3193697   -.0281978
+           21  |   .5473894   .0733107     7.47   0.000     .4001406    .6946382
+           22  |    .928365   .0500019    18.57   0.000     .8279333    1.028797
+           23  |   2.402076   .1165709    20.61   0.000     2.167936    2.636215
+           24  |   .6023489   .0936975     6.43   0.000      .414152    .7905458
+           25  |   1.144415    .109811    10.42   0.000     .9238532    1.364977
+           26  |   1.679289   .0714137    23.51   0.000      1.53585    1.822727
+           27  |   1.497473   .0922925    16.23   0.000     1.312098    1.682848
+           28  |  -1.557981   .0828906   -18.80   0.000    -1.724472   -1.391491
+           29  |  -1.186402   .0850364   -13.95   0.000    -1.357203   -1.015601
+           30  |   2.170642   .1048031    20.71   0.000     1.960139    2.381145
+           31  |   -.195942   .0890376    -2.20   0.032    -.3747794   -.0171047
+           32  |   2.457929   .1217387    20.19   0.000      2.21341    2.702448
+           33  |  -.5033279   .1225548    -4.11   0.000    -.7494865   -.2571693
+           34  |  -.6207724   .1113524    -5.57   0.000    -.8444303   -.3971144
+           35  |   2.042265   .1670529    12.23   0.000     1.706729    2.377801
+           36  |   1.506864   .0851037    17.71   0.000     1.335928      1.6778
+           37  |   .0317049   .0493033     0.64   0.523    -.0673237    .1307336
+           38  |   8.490452    .138306    61.39   0.000     8.212656    8.768248
+           39  |   .5632841   .0717737     7.85   0.000     .4191224    .7074457
+           40  |   1.519448   .1158452    13.12   0.000     1.286766    1.752129
+           41  |   1.583239   .1114676    14.20   0.000      1.35935    1.807129
+           42  |   .5885158   .0777954     7.56   0.000     .4322592    .7447724
+           44  |  -1.543524   .0999533   -15.44   0.000    -1.744286   -1.342762
+           45  |  -.1094255   .0434813    -2.52   0.015    -.1967603   -.0220907
+           46  |  -.4872114   .1095572    -4.45   0.000    -.7072636   -.2671592
+           47  |    .243522   .0622571     3.91   0.000      .118475    .3685691
+           48  |   1.285191   .1427551     9.00   0.000     .9984589    1.571923
+           49  |   .3857889   .1330534     2.90   0.006     .1185433    .6530345
+           50  |   2.217714   .1362545    16.28   0.000     1.944039    2.491389
+           51  |   1.207588   .0696794    17.33   0.000     1.067633    1.347543
+           53  |   3.460534   .1102984    31.37   0.000     3.238994    3.682075
+           54  |   .8177046   .1243538     6.58   0.000     .5679327    1.067476
+           55  |   1.029221   .0925086    11.13   0.000      .843412     1.21503
+           56  |  -.1404117     .10821    -1.30   0.200    -.3577579    .0769345
+               |
+         _cons |  -4.084631   2.043303    -2.00   0.051    -8.188726    .0194648
+--------------------------------------------------------------------------------
+
+. di ""
+
+
+. di "--- Broad outcome: total effect DURING tax season (did_ind + did_x_season) ---"
+--- Broad outcome: total effect DURING tax season (did_ind + did_x_season) ---
+
+. lincom did_ind + did_x_season
+
+ ( 1)  did_ind + did_x_season = 0
+
+------------------------------------------------------------------------------
+   financial | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         (1) |  -.9480532   .8043155    -1.18   0.244    -2.563568     .667462
+------------------------------------------------------------------------------
+
+. outreg2 using "Results/Table9_TaxSeason_TripleDiD.xls", ///
+>     ctitle("(1) Broad Outcome") ///
+>     keep(did_ind did_x_season treatment_ind post_tcja tax_season ///
+>          treat_x_season post_x_season $controls) ///
+>     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Outcome","All financial mgmt") ///
+>     bdec(3) se replace
+Results/Table9_TaxSeason_TripleDiD.xls
+dir : seeout
+
+. 
+. *--- (2) Narrow outcome (tax/insurance time only), triple-diff ---
+. *   Sharpest test: if the mechanism is filing-driven, this effect should be
+. *   concentrated almost entirely in did_x_season, with did_ind near zero.
+. reg tax did_ind did_x_season treatment_ind post_tcja tax_season ///
+>     treat_x_season post_x_season $controls i.year i.statefip ///
+>     [pw = wt06], robust cluster(statefip)
+(sum of wgt is 844,469,890,826.2)
+note: 14.famincome omitted because of collinearity.
+note: 2023.year omitted because of collinearity.
+
+Linear regression                               Number of obs     =     87,779
+                                                F(48, 50)         =          .
+                                                Prob > F          =          .
+                                                R-squared         =     0.0120
+                                                Root MSE          =     29.905
+
+                                (Std. err. adjusted for 51 clusters in statefip)
+--------------------------------------------------------------------------------
+               |               Robust
+           tax | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+       did_ind |  -.9464386   .6742697    -1.40   0.167    -2.300749     .407872
+  did_x_season |    .186994   .9351899     0.20   0.842     -1.69139    2.065378
+ treatment_ind |   1.950669   .9797981     1.99   0.052    -.0173134    3.918651
+     post_tcja |   .3531667   .6276321     0.56   0.576    -.9074694    1.613803
+    tax_season |  -.4914556   .5567871    -0.88   0.382    -1.609795    .6268842
+treat_x_season |  -.9697524   .5993159    -1.62   0.112    -2.173514     .234009
+ post_x_season |  -.3956975   .7374374    -0.54   0.594    -1.876884    1.085489
+          male |  -2.473152   .3233449    -7.65   0.000    -3.122609   -1.823694
+           age |   .0998671   .0372231     2.68   0.010     .0251024    .1746318
+         age_2 |  -.0830697   .0420915    -1.97   0.054    -.1676129    .0014735
+     full_time |  -3.141557   .3632349    -8.65   0.000    -3.871135   -2.411978
+male_full_time |   1.225937   .4229772     2.90   0.006     .3763619    2.075511
+        educ_2 |   .9419716   .3802367     2.48   0.017     .1782437      1.7057
+        educ_3 |   3.023386   .3941017     7.67   0.000     2.231809    3.814962
+      hispanic |  -1.349257   .3109234    -4.34   0.000    -1.973765   -.7247487
+       married |    .285852   .2785583     1.03   0.310    -.2736488    .8453529
+         white |    4.37846   1.242768     3.52   0.001     1.882287    6.874634
+         black |   2.401471   1.372984     1.75   0.086    -.3562473     5.15919
+        indian |   2.962667   1.397542     2.12   0.039     .1556217    5.769712
+         asian |   .9632336   1.197012     0.80   0.425    -1.441035    3.367502
+       pacific |   1.045707   1.563375     0.67   0.507    -2.094424    4.185839
+   other_races |   5.361515    1.73279     3.09   0.003     1.881105    8.841926
+       retired |   2.387207   .5789836     4.12   0.000     1.224285     3.55013
+       hh_size |  -.4913827   .1361312    -3.61   0.001    -.7648102   -.2179552
+    hh_numkids |   .5222336   .1882462     2.77   0.008     .1441299    .9003372
+     ageychild |  -.0201825   .0282845    -0.71   0.479    -.0769936    .0366286
+               |
+     famincome |
+            2  |  -.7994119   1.036966    -0.77   0.444    -2.882219    1.283395
+            3  |  -1.229308   .8946676    -1.37   0.176    -3.026301    .5676851
+            4  |  -.8740726   .9955836    -0.88   0.384    -2.873761    1.125616
+            5  |  -1.102319   .9455116    -1.17   0.249    -3.001435     .796797
+            6  |  -1.328608   1.007371    -1.32   0.193    -3.351972    .6947553
+            7  |  -.8287017    .843577    -0.98   0.331    -2.523076    .8656726
+            8  |   .2433191   .9914795     0.25   0.807    -1.748126    2.234764
+            9  |   .1627497   .9065586     0.18   0.858    -1.658127    1.983626
+           10  |  -.4424592   .9222614    -0.48   0.633    -2.294876    1.409957
+           11  |   .1422742   .8331953     0.17   0.865    -1.531248    1.815796
+           12  |  -.7097881   .5589605    -1.27   0.210    -1.832493    .4129172
+           13  |  -.6302836   .3638938    -1.73   0.089    -1.361186    .1006186
+           14  |          0  (omitted)
+           15  |   1.349936   .8382434     1.61   0.114    -.3337259    3.033597
+           16  |   1.771477   .9852986     1.80   0.078    -.2075534    3.750507
+               |
+          year |
+         2014  |  -1.025903   .4666748    -2.20   0.033    -1.963247   -.0885591
+         2015  |   .1951729   .4692309     0.42   0.679    -.7473052    1.137651
+         2016  |   .0681809   .4507878     0.15   0.880    -.8372531     .973615
+         2017  |  -.5104009   .4603181    -1.11   0.273    -1.434977    .4141752
+         2018  |  -.2234742   .5598261    -0.40   0.691    -1.347918    .9009696
+         2019  |   .8802648   .6023337     1.46   0.150     -.329558    2.090088
+         2020  |  -.4033539   .4373659    -0.92   0.361    -1.281829    .4751214
+         2021  |   .1576369   .6223792     0.25   0.801    -1.092449    1.407722
+         2022  |   .5792536   .8064217     0.72   0.476    -1.040492    2.198999
+         2023  |          0  (omitted)
+               |
+      statefip |
+            2  |   9.139128   .2134867    42.81   0.000     8.710327    9.567928
+            4  |   1.675104   .1146556    14.61   0.000     1.444811    1.905396
+            5  |   1.241803   .0616706    20.14   0.000     1.117934    1.365672
+            6  |   2.524402    .158387    15.94   0.000     2.206272    2.842532
+            8  |   1.795277   .1016871    17.65   0.000     1.591032    1.999521
+            9  |   1.784118   .0988221    18.05   0.000     1.585627    1.982608
+           10  |   .4197043   .0655589     6.40   0.000     .2880254    .5513831
+           11  |   .2695247   .1785451     1.51   0.137    -.0890938    .6281431
+           12  |   .9322435   .0825233    11.30   0.000     .7664906    1.097996
+           13  |    1.52494   .0528418    28.86   0.000     1.418804    1.631076
+           15  |   .9362081   .3593493     2.61   0.012     .2144338    1.657982
+           16  |   2.170042   .0943595    23.00   0.000     1.980515    2.359569
+           17  |  -.0626896   .0744655    -0.84   0.404    -.2122579    .0868787
+           18  |   .7267531   .0696619    10.43   0.000     .5868331    .8666731
+           19  |   .5663485   .0932098     6.08   0.000     .3791311     .753566
+           20  |   .4632827   .0683238     6.78   0.000     .3260504     .600515
+           21  |   .9193869   .0610637    15.06   0.000     .7967368    1.042037
+           22  |    1.41799   .0443332    31.98   0.000     1.328944    1.507036
+           23  |   3.413819   .0956253    35.70   0.000      3.22175    3.605888
+           24  |   1.022591    .093682    10.92   0.000     .8344252    1.210757
+           25  |   .7257908   .1041831     6.97   0.000     .5165329    .9350486
+           26  |   1.573339    .060526    25.99   0.000      1.45177    1.694909
+           27  |   1.687776   .0890457    18.95   0.000     1.508922    1.866629
+           28  |  -.3898789   .0717999    -5.43   0.000    -.5340933   -.2456645
+           29  |  -.0811341   .0720897    -1.13   0.266    -.2259305    .0636623
+           30  |   2.896897   .1000885    28.94   0.000     2.695863     3.09793
+           31  |   .7621715   .0820631     9.29   0.000      .597343    .9270001
+           32  |   2.993748    .104565    28.63   0.000     2.783723    3.203773
+           33  |  -.6378778   .0952452    -6.70   0.000    -.8291834   -.4465722
+           34  |   .2104354   .1089605     1.93   0.059    -.0084182    .4292891
+           35  |   .6304481   .1495437     4.22   0.000     .3300808    .9308155
+           36  |   1.156944   .0831108    13.92   0.000     .9900113    1.323877
+           37  |   .7912932   .0418132    18.92   0.000      .707309    .8752774
+           38  |   8.913001   .1336119    66.71   0.000     8.644634    9.181369
+           39  |   .6137116   .0594909    10.32   0.000     .4942206    .7332027
+           40  |   .7927381   .1013035     7.83   0.000      .589264    .9962123
+           41  |   2.008915   .0913801    21.98   0.000     1.825373    2.192457
+           42  |   .6151738   .0610478    10.08   0.000     .4925556     .737792
+           44  |   .1998908    .081831     2.44   0.018     .0355283    .3642533
+           45  |   .7231589   .0399094    18.12   0.000     .6429986    .8033193
+           46  |   .2917229   .0963981     3.03   0.004     .0981016    .4853442
+           47  |   .2965219   .0496653     5.97   0.000     .1967662    .3962777
+           48  |   1.283997   .1264958    10.15   0.000     1.029923    1.538072
+           49  |   .9761656   .1084964     9.00   0.000     .7582442    1.194087
+           50  |   3.655858    .116671    31.33   0.000     3.421517    3.890198
+           51  |   1.396247   .0669683    20.85   0.000     1.261738    1.530757
+           53  |   4.058558   .1010449    40.17   0.000     3.855603    4.261513
+           54  |   .5578187   .1098574     5.08   0.000     .3371635    .7784738
+           55  |   1.625145   .0798973    20.34   0.000     1.464666    1.785623
+           56  |   1.789331   .1053203    16.99   0.000     1.577789    2.000873
+               |
+         _cons |  -.8455276   1.577481    -0.54   0.594    -4.013991    2.322935
+--------------------------------------------------------------------------------
+
+. di ""
+
+
+. di "--- Narrow (tax) outcome: total effect DURING tax season (did_ind + did_x_season) ---"
+--- Narrow (tax) outcome: total effect DURING tax season (did_ind + did_x_season) ---
+
+. lincom did_ind + did_x_season
+
+ ( 1)  did_ind + did_x_season = 0
+
+------------------------------------------------------------------------------
+         tax | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         (1) |  -.7594446   .5414846    -1.40   0.167    -1.847048    .3281591
+------------------------------------------------------------------------------
+
+. outreg2 using "Results/Table9_TaxSeason_TripleDiD.xls", ///
+>     ctitle("(2) Narrow: Tax Time") ///
+>     keep(did_ind did_x_season treatment_ind post_tcja tax_season ///
+>          treat_x_season post_x_season $controls) ///
+>     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Outcome","Tax/insurance minutes only") ///
+>     bdec(3) se append
+Results/Table9_TaxSeason_TripleDiD.xls
+dir : seeout
+
+. 
+. *--- (3) [NEW] Broad outcome, restricted to the CLEAN comparison sample ---
+. *   Columns (1)-(2) above run on the full famincome 1-16 range, so
+. *   treat_x_season/did_x_season are picking up "treated vs everyone else"
+. *   (transition zone + high income included), same contamination issue as
+. *   Table 2 columns (1)-(2) - see the note at the top of Part II. This
+. *   column restricts to treatment_ind==1 | control_group==1 so the
+. *   tax-season test is run on the sample the paper's design actually
+. *   describes. Compare directly to Table 2 column (3).
+. preserve
+
+. keep if treatment_ind == 1 | control_group == 1
+(33,825 observations deleted)
+
+. reg financial did_ind did_x_season treatment_ind post_tcja tax_season ///
+>     treat_x_season post_x_season $controls i.year i.statefip ///
+>     [pw = wt06], robust cluster(statefip)
+(sum of wgt is 495,599,925,490.9)
+note: 14.famincome omitted because of collinearity.
+note: 2023.year omitted because of collinearity.
+
+Linear regression                               Number of obs     =     53,954
+                                                F(44, 50)         =          .
+                                                Prob > F          =          .
+                                                R-squared         =     0.0190
+                                                Root MSE          =     32.981
+
+                                (Std. err. adjusted for 51 clusters in statefip)
+--------------------------------------------------------------------------------
+               |               Robust
+     financial | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+       did_ind |   .8688177   .7821588     1.11   0.272    -.7021945     2.43983
+  did_x_season |  -1.101858   1.482785    -0.74   0.461     -4.08012    1.876403
+ treatment_ind |   2.708137   1.000193     2.71   0.009     .6991894    4.717084
+     post_tcja |  -1.596075   .9229226    -1.73   0.090    -3.449819    .2576696
+    tax_season |   .5956232   .7114371     0.84   0.406    -.8333403    2.024587
+treat_x_season |  -.9103038   .9136485    -1.00   0.324    -2.745421    .9248132
+ post_x_season |  -.0626264   .9317061    -0.07   0.947    -1.934013     1.80876
+          male |  -2.517385   .4803999    -5.24   0.000    -3.482297   -1.552473
+           age |   .0804496   .0776996     1.04   0.305    -.0756147    .2365138
+         age_2 |  -.0018214   .0858765    -0.02   0.983    -.1743094    .1706666
+     full_time |  -3.423401   .6344838    -5.40   0.000    -4.697799   -2.149003
+male_full_time |   1.352736   .6754674     2.00   0.051    -.0039799    2.709453
+        educ_2 |   1.763883   .6530049     2.70   0.009     .4522841    3.075482
+        educ_3 |   4.394994   .7132682     6.16   0.000     2.962353    5.827636
+      hispanic |  -2.232704   .4578294    -4.88   0.000    -3.152281   -1.313126
+       married |   .4936089   .3417109     1.44   0.155    -.1927376    1.179955
+         white |   4.566329   2.055391     2.22   0.031     .4379547    8.694704
+         black |   2.152162   2.130012     1.01   0.317    -2.126093    6.430417
+        indian |   2.028081   2.208675     0.92   0.363    -2.408174    6.464336
+         asian |   .4796928   1.979776     0.24   0.810    -3.496804    4.456189
+       pacific |  -.1449863   3.028454    -0.05   0.962    -6.227814    5.937842
+   other_races |   7.179364   3.139601     2.29   0.026      .873289    13.48544
+       retired |   2.146686   .7946121     2.70   0.009     .5506602    3.742711
+       hh_size |  -.7127574   .1941195    -3.67   0.001    -1.102658   -.3228569
+    hh_numkids |   .8294873   .2381475     3.48   0.001      .351154    1.307821
+     ageychild |  -.0086125   .0391422    -0.22   0.827    -.0872319    .0700069
+               |
+     famincome |
+            2  |  -.3325595   1.225427    -0.27   0.787    -2.793901    2.128782
+            3  |  -.6882431   .9978933    -0.69   0.494    -2.692571    1.316085
+            4  |  -.8043318   1.106151    -0.73   0.471    -3.026102    1.417438
+            5  |  -.9703934   1.125036    -0.86   0.393    -3.230094    1.289307
+            6  |  -.5548778   1.144039    -0.49   0.630    -2.852748    1.742992
+            7  |   .0481062   1.024037     0.05   0.963    -2.008733    2.104946
+            8  |      1.113   1.172155     0.95   0.347    -1.241343    3.467343
+            9  |   .9049875   .9115477     0.99   0.326    -.9259099    2.735885
+           12  |   -1.21025   .5755639    -2.10   0.041    -2.366304   -.0541963
+           13  |  -1.005737   .3553763    -2.83   0.007    -1.719532   -.2919432
+           14  |          0  (omitted)
+               |
+          year |
+         2014  |  -1.116906   .6901747    -1.62   0.112    -2.503163    .2693501
+         2015  |  -.1669561   .7321653    -0.23   0.821    -1.637553    1.303641
+         2016  |   .0436612    .742676     0.06   0.953    -1.448047     1.53537
+         2017  |  -1.013555   .6169938    -1.64   0.107    -2.252823    .2257138
+         2018  |   .3813383   .7713067     0.49   0.623    -1.167877    1.930553
+         2019  |   1.297016   .6899412     1.88   0.066    -.0887719    2.682804
+         2020  |  -.2008172   .8089898    -0.25   0.805    -1.825721    1.424087
+         2021  |   1.034129   1.159593     0.89   0.377    -1.294981     3.36324
+         2022  |   .6213529   1.002222     0.62   0.538    -1.391669    2.634375
+         2023  |          0  (omitted)
+               |
+      statefip |
+            2  |   1.269563   .3612424     3.51   0.001     .5439865     1.99514
+            4  |   2.273816   .1944431    11.69   0.000     1.883266    2.664367
+            5  |  -.1545337   .0801925    -1.93   0.060    -.3156051    .0065377
+            6  |   2.313204   .2749818     8.41   0.000     1.760887    2.865521
+            8  |   1.716852   .1253179    13.70   0.000     1.465144     1.96856
+            9  |   2.320807   .1498521    15.49   0.000      2.01982    2.621794
+           10  |  -2.577306   .1026678   -25.10   0.000     -2.78352   -2.371092
+           11  |  -.9903579   .2818189    -3.51   0.001    -1.556408   -.4243079
+           12  |  -.8098162   .1269168    -6.38   0.000    -1.064736   -.5548963
+           13  |   1.288077   .0742055    17.36   0.000     1.139031    1.437123
+           15  |   6.142824   .5177822    11.86   0.000     5.102828     7.18282
+           16  |   2.036169   .1303203    15.62   0.000     1.774413    2.297925
+           17  |  -1.011868   .0999863   -10.12   0.000    -1.212697   -.8110398
+           18  |  -.5970352   .1138474    -5.24   0.000    -.8257045   -.3683659
+           19  |   1.715755    .138388    12.40   0.000     1.437795    1.993716
+           20  |  -1.617359   .1176654   -13.75   0.000    -1.853697   -1.381021
+           21  |  -.9600769     .10715    -8.96   0.000    -1.175294   -.7448597
+           22  |  -.2057626    .069311    -2.97   0.005    -.3449779   -.0665473
+           23  |  -1.189243   .1742492    -6.82   0.000    -1.539233   -.8392532
+           24  |  -.4018512   .1229661    -3.27   0.002     -.648836   -.1548664
+           25  |  -.7505345   .1209796    -6.20   0.000    -.9935293   -.5075398
+           26  |  -.2312797   .0771337    -3.00   0.004    -.3862073   -.0763521
+           27  |   .6362988   .1407174     4.52   0.000     .3536596     .918938
+           28  |   -2.07053   .1180117   -17.55   0.000    -2.307564   -1.833497
+           29  |  -1.679682    .128582   -13.06   0.000    -1.937947   -1.421418
+           30  |   .4415697   .1456475     3.03   0.004     .1490281    .7341113
+           31  |   -2.09043      .1129   -18.52   0.000    -2.317196   -1.863664
+           32  |   4.147519   .1620436    25.60   0.000     3.822045    4.472994
+           33  |  -2.364913   .1464379   -16.15   0.000    -2.659042   -2.070784
+           34  |  -.6586294   .1424072    -4.62   0.000    -.9446627   -.3725961
+           35  |   2.576903   .2499109    10.31   0.000     2.074942    3.078864
+           36  |   .6050936   .1374363     4.40   0.000     .3290447    .8811425
+           37  |  -1.012681   .0637772   -15.88   0.000    -1.140782   -.8845812
+           38  |   13.03109   .1831607    71.15   0.000      12.6632    13.39898
+           39  |  -1.368739   .0946402   -14.46   0.000     -1.55883   -1.178649
+           40  |   .8130094   .1415338     5.74   0.000     .5287304    1.097288
+           41  |   .2861367   .1569933     1.82   0.074    -.0291936     .601467
+           42  |   .0231544   .1200646     0.19   0.848    -.2180024    .2643111
+           44  |  -.3692187   .1539372    -2.40   0.020    -.6784107   -.0600268
+           45  |  -.7517604   .0644076   -11.67   0.000     -.881127   -.6223939
+           46  |  -.3674755    .132505    -2.77   0.008    -.6336197   -.1013313
+           47  |  -1.351756   .1028279   -13.15   0.000    -1.558292    -1.14522
+           48  |    .433911   .2337658     1.86   0.069    -.0356213    .9034433
+           49  |  -.9179722   .1802446    -5.09   0.000    -1.280004   -.5559403
+           50  |   -3.98697   .2177766   -18.31   0.000    -4.424387   -3.549553
+           51  |   .8334824      .0876     9.51   0.000     .6575327    1.009432
+           53  |   1.796912    .165585    10.85   0.000     1.464325    2.129499
+           54  |  -1.645607   .1675549    -9.82   0.000    -1.982151   -1.309064
+           55  |   .5711841   .1132625     5.04   0.000     .3436897    .7986785
+           56  |  -3.801295   .1690859   -22.48   0.000    -4.140914   -3.461676
+               |
+         _cons |   .1801719   2.505748     0.07   0.943    -4.852771    5.213115
+--------------------------------------------------------------------------------
+
+. di ""
+
+
+. di "--- CLEAN SAMPLE, broad outcome: total effect DURING tax season ---"
+--- CLEAN SAMPLE, broad outcome: total effect DURING tax season ---
+
+. lincom did_ind + did_x_season
+
+ ( 1)  did_ind + did_x_season = 0
+
+------------------------------------------------------------------------------
+   financial | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         (1) |  -.2330408    1.08542    -0.21   0.831    -2.413172     1.94709
+------------------------------------------------------------------------------
+
+. outreg2 using "Results/Table9_TaxSeason_TripleDiD.xls", ///
+>     ctitle("(3) Broad, Clean Sample") ///
+>     keep(did_ind did_x_season treatment_ind post_tcja tax_season ///
+>          treat_x_season post_x_season $controls) ///
+>     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Outcome","All financial mgmt","Sample","PREFERRED: 
+> 50-100k vs <35k") ///
+>     bdec(3) se append
+Results/Table9_TaxSeason_TripleDiD.xls
+dir : seeout
+
+. restore
+
+. 
+. *--- (4) [NEW] Narrow outcome, restricted to the CLEAN comparison sample ---
+. *   The sharpest available test: narrow outcome + correct comparison group.
+. preserve
+
+. keep if treatment_ind == 1 | control_group == 1
+(33,825 observations deleted)
+
+. reg tax did_ind did_x_season treatment_ind post_tcja tax_season ///
+>     treat_x_season post_x_season $controls i.year i.statefip ///
+>     [pw = wt06], robust cluster(statefip)
+(sum of wgt is 495,599,925,490.9)
+note: 14.famincome omitted because of collinearity.
+note: 2023.year omitted because of collinearity.
+
+Linear regression                               Number of obs     =     53,954
+                                                F(44, 50)         =          .
+                                                Prob > F          =          .
+                                                R-squared         =     0.0127
+                                                Root MSE          =     29.022
+
+                                (Std. err. adjusted for 51 clusters in statefip)
+--------------------------------------------------------------------------------
+               |               Robust
+           tax | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+       did_ind |  -.0250334   .6709801    -0.04   0.970    -1.372737     1.32267
+  did_x_season |  -.4433885   1.184705    -0.37   0.710    -2.822938    1.936161
+ treatment_ind |   1.371741   1.018856     1.35   0.184     -.674691    3.418174
+     post_tcja |  -1.059195    .726921    -1.46   0.151    -2.519259     .400869
+    tax_season |  -.3089694   .6015622    -0.51   0.610    -1.517243    .8993038
+treat_x_season |  -1.155084   .7327932    -1.58   0.121    -2.626943    .3167741
+ post_x_season |   .2427595   .7719295     0.31   0.754    -1.307707    1.793225
+          male |  -2.657501   .3749184    -7.09   0.000    -3.410547   -1.904455
+           age |   .0457134   .0627353     0.73   0.470    -.0802942     .171721
+         age_2 |  -.0196966   .0685911    -0.29   0.775    -.1574658    .1180726
+     full_time |  -2.520218   .5523747    -4.56   0.000    -3.629696   -1.410741
+male_full_time |   1.748123   .5306934     3.29   0.002     .6821936    2.814052
+        educ_2 |   .9743467    .599004     1.63   0.110    -.2287882    2.177482
+        educ_3 |   2.811042   .6060119     4.64   0.000     1.593831    4.028253
+      hispanic |  -1.880998   .4282479    -4.39   0.000    -2.741159   -1.020837
+       married |   .3947582   .2896399     1.36   0.179    -.1870007    .9765171
+         white |   3.395449   1.181395     2.87   0.006     1.022548     5.76835
+         black |   1.601819   1.267131     1.26   0.212    -.9432876    4.146926
+        indian |    2.13849   1.486801     1.44   0.157    -.8478366    5.124817
+         asian |   .6784005   1.210616     0.56   0.578    -1.753194    3.109995
+       pacific |   1.066999   2.448766     0.44   0.665    -3.851492     5.98549
+   other_races |   4.623335   2.037586     2.27   0.028     .5307242    8.715947
+       retired |   2.083367   .6159729     3.38   0.001     .8461488    3.320585
+       hh_size |  -.6323955    .129805    -4.87   0.000    -.8931165   -.3716745
+    hh_numkids |   .7232681   .1833679     3.94   0.000     .3549627    1.091573
+     ageychild |  -.0017953   .0320143    -0.06   0.956    -.0660979    .0625073
+               |
+     famincome |
+            2  |  -.8266412   1.053007    -0.79   0.436    -2.941668    1.288386
+            3  |  -1.201677   .9006795    -1.33   0.188    -3.010745    .6073913
+            4  |  -.9183617    1.00425    -0.91   0.365    -2.935458    1.098735
+            5  |  -1.167267   .9429229    -1.24   0.222    -3.061183    .7266495
+            6  |  -1.394824   1.022778    -1.36   0.179    -3.449134    .6594865
+            7  |  -.9077403   .8708486    -1.04   0.302    -2.656891    .8414106
+            8  |   .1132085   1.008478     0.11   0.911    -1.912379    2.138796
+            9  |  -.0018028   .9038767    -0.00   0.998    -1.817293    1.813687
+           12  |  -.6259655   .5526575    -1.13   0.263    -1.736011    .4840797
+           13  |  -.5841103   .3584829    -1.63   0.110    -1.304144    .1359237
+           14  |          0  (omitted)
+               |
+          year |
+         2014  |  -1.790741   .5546947    -3.23   0.002    -2.904878   -.6766038
+         2015  |  -.5222808   .5982815    -0.87   0.387    -1.723965    .6794029
+         2016  |  -.2209218   .6422747    -0.34   0.732    -1.510969    1.069125
+         2017  |  -1.190541   .4846078    -2.46   0.018    -2.163905   -.2171779
+         2018  |  -.4121506    .554974    -0.74   0.461    -1.526849    .7025475
+         2019  |    .879744   .6222295     1.41   0.164    -.3700408    2.129529
+         2020  |  -.0657698   .6756907    -0.10   0.923    -1.422934    1.291395
+         2021  |   .5567365   .8110116     0.69   0.496    -1.072228    2.185701
+         2022  |   .2509985   .8297419     0.30   0.764    -1.415587    1.917584
+         2023  |          0  (omitted)
+               |
+      statefip |
+            2  |   1.847472   .2910358     6.35   0.000     1.262909    2.432035
+            4  |   1.898012   .1877657    10.11   0.000     1.520873     2.27515
+            5  |   1.430573   .0707328    20.23   0.000     1.288502    1.572644
+            6  |   2.790811   .2432609    11.47   0.000     2.302207    3.279415
+            8  |    2.64026   .1260492    20.95   0.000     2.387082    2.893437
+            9  |   2.940246   .1320397    22.27   0.000     2.675036    3.205455
+           10  |  -2.834782   .0960484   -29.51   0.000    -3.027701   -2.641864
+           11  |  -.9617568   .2384367    -4.03   0.000    -1.440671   -.4828426
+           12  |   .3785049   .1224821     3.09   0.003     .1324923    .6245175
+           13  |   1.398159    .059551    23.48   0.000     1.278547     1.51777
+           15  |  -.5636201   .4221363    -1.34   0.188    -1.411506    .2842656
+           16  |   2.585701   .1143431    22.61   0.000     2.356036    2.815366
+           17  |  -.1372074   .0998602    -1.37   0.176    -.3377825    .0633676
+           18  |   .5938827   .1045624     5.68   0.000      .383863    .8039024
+           19  |   1.288441   .1304204     9.88   0.000     1.026484    1.550399
+           20  |   .0216026   .1060324     0.20   0.839    -.1913697    .2345749
+           21  |    .602883   .0813787     7.41   0.000      .439429    .7663369
+           22  |   1.105174   .0538873    20.51   0.000      .996938     1.21341
+           23  |   .4070177   .1518895     2.68   0.010     .1019385    .7120968
+           24  |   1.039018   .1021529    10.17   0.000     .8338383    1.244198
+           25  |   .4322868   .1191943     3.63   0.001      .192878    .6716957
+           26  |   .6826051   .0735095     9.29   0.000     .5349568    .8302534
+           27  |   1.339467   .1381331     9.70   0.000     1.062019    1.616916
+           28  |  -.5938796   .0919327    -6.46   0.000    -.7785319   -.4092273
+           29  |  -.0595166   .1120429    -0.53   0.598    -.2845613    .1655281
+           30  |   2.457898   .1296475    18.96   0.000     2.197493    2.718302
+           31  |    -.84047   .1106074    -7.60   0.000    -1.062632   -.6183084
+           32  |   4.772061   .1504623    31.72   0.000     4.469848    5.074273
+           33  |  -.8417315   .1251867    -6.72   0.000    -1.093176   -.5902866
+           34  |   .2105284   .1348057     1.56   0.125    -.0602368    .4812936
+           35  |   .3583322   .2549283     1.41   0.166    -.1537063    .8703707
+           36  |   .2899877   .1251617     2.32   0.025      .038593    .5413825
+           37  |   .5184125   .0572864     9.05   0.000     .4033494    .6334755
+           38  |   15.40112   .1687511    91.27   0.000     15.06217    15.74006
+           39  |  -.6115504   .0802985    -7.62   0.000    -.7728346   -.4502661
+           40  |   .9478029   .1303982     7.27   0.000     .6858904    1.209715
+           41  |   1.586699   .1290211    12.30   0.000     1.327552    1.845845
+           42  |   .7720018   .1014683     7.61   0.000     .5681968    .9758068
+           44  |   1.351968   .1220446    11.08   0.000     1.106834    1.597102
+           45  |   .4585782   .0567811     8.08   0.000       .34453    .5726263
+           46  |   1.473176   .1328465    11.09   0.000     1.206346    1.740006
+           47  |  -.6929794   .0833488    -8.31   0.000    -.8603905   -.5255683
+           48  |   1.381223   .2146525     6.43   0.000     .9500808    1.812365
+           49  |   .2429467   .1555501     1.56   0.125     -.069485    .5553783
+           50  |   -1.37148   .1820933    -7.53   0.000    -1.737225   -1.005735
+           51  |    1.72581   .0860949    20.05   0.000     1.552883    1.898737
+           53  |   3.500336   .1482481    23.61   0.000     3.202571    3.798101
+           54  |  -1.711499   .1330549   -12.86   0.000    -1.978747    -1.44425
+           55  |   1.970865    .102945    19.14   0.000     1.764094    2.177636
+           56  |  -1.468842   .1382711   -10.62   0.000    -1.746568   -1.191116
+               |
+         _cons |   2.230325   1.654372     1.35   0.184    -1.092578    5.553228
+--------------------------------------------------------------------------------
+
+. di ""
+
+
+. di "--- CLEAN SAMPLE, narrow (tax) outcome: total effect DURING tax season ---"
+--- CLEAN SAMPLE, narrow (tax) outcome: total effect DURING tax season ---
+
+. lincom did_ind + did_x_season
+
+ ( 1)  did_ind + did_x_season = 0
+
+------------------------------------------------------------------------------
+         tax | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+         (1) |  -.4684219   .8553276    -0.55   0.586    -2.186398    1.249554
+------------------------------------------------------------------------------
+
+. outreg2 using "Results/Table9_TaxSeason_TripleDiD.xls", ///
+>     ctitle("(4) Narrow, Clean Sample") ///
+>     keep(did_ind did_x_season treatment_ind post_tcja tax_season ///
+>          treat_x_season post_x_season $controls) ///
+>     addtext("Controls","Yes","State FE","Yes","Year FE","Yes","Outcome","Tax/insurance minutes only","Sample","PRE
+> FERRED: 50-100k vs <35k") ///
+>     bdec(3) se append
+Results/Table9_TaxSeason_TripleDiD.xls
+dir : seeout
+
+. restore
+
+. 
+. di ""
+
+
+. di "--- Interpretation guide for Table 9 ---"
+--- Interpretation guide for Table 9 ---
+
+. di "  did_ind      = effect OUTSIDE tax season (expect ~0 if mechanism is filing-driven)"
+  did_ind      = effect OUTSIDE tax season (expect ~0 if mechanism is filing-driven)
+
+. di "  did_x_season = ADDITIONAL effect DURING tax season (key coefficient)"
+  did_x_season = ADDITIONAL effect DURING tax season (key coefficient)
+
+. di "  did_ind + did_x_season (see lincom above) = total effect DURING tax season"
+  did_ind + did_x_season (see lincom above) = total effect DURING tax season
+
+. di "  Columns (3)-(4) are on the PREFERRED clean sample - read those over (1)-(2)."
+  Columns (3)-(4) are on the PREFERRED clean sample - read those over (1)-(2).
+
+. di ""
+
 
 . 
 . 
@@ -1920,6 +4407,356 @@ male_full_time |          0  (omitted)
          _cons |  -3.505804   2.782247    -1.26   0.213    -9.094112    2.082504
 --------------------------------------------------------------------------------
 file Results/Figure2_EventStudy_Men.png saved as PNG format
+
+. 
+. 
+. ********************************************************************************
+. ** PART IV-B [NEW] - EVENT STUDIES FOR SIGNIFICANT SUBGROUPS (Table 10)
+. ********************************************************************************
+. **  Reviewer #2: "We need to see parallel trends tests for the
+. **  heterogeneous effects that look significant (e.g. college educated
+. **  individuals in Table 6)." This mirrors the gender event-study loop
+. **  above (Part IV) for the college-educated and high-SALT subgroups,
+. **  where Table 6 reports significant DiD coefficients, WITH their own
+. **  joint pre-trend test - without this, a "significant" subgroup result
+. **  could simply be riding a pre-existing subgroup-specific trend.
+. ********************************************************************************
+. 
+. use "Data/TCJA_Financial_Time.dta", clear
+
+. 
+. *--- College-educated only ---
+. preserve
+
+. keep if educ_3 == 1
+(31,497 observations deleted)
+
+. levelsof year, local(years)
+2013 2014 2015 2016 2017 2018 2019 2020 2021 2022 2023
+
+. foreach yr of local years {
+  2.     generate treat_yr_`yr' = treatment_ind * (year == `yr')
+  3. }
+
+. drop treat_yr_2017
+
+. capture drop treat_yr_2020
+
+. reg financial treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016 ///
+>     treat_yr_2018 treat_yr_2019 treat_yr_2021 treat_yr_2022 treat_yr_2023 ///
+>     treatment_ind post_tcja $controls_noinc i.year i.statefip ///
+>     [pw = wt06], robust cluster(statefip)
+(sum of wgt is 478,112,511,918.9)
+note: educ_2 omitted because of collinearity.
+note: educ_3 omitted because of collinearity.
+note: 2023.year omitted because of collinearity.
+
+Linear regression                               Number of obs     =     56,282
+                                                F(36, 50)         =          .
+                                                Prob > F          =          .
+                                                R-squared         =     0.0192
+                                                Root MSE          =      38.46
+
+                                (Std. err. adjusted for 51 clusters in statefip)
+--------------------------------------------------------------------------------
+               |               Robust
+     financial | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+ treat_yr_2013 |   1.688979   1.655785     1.02   0.313    -1.636763     5.01472
+ treat_yr_2014 |    .976668    1.43743     0.68   0.500    -1.910495    3.863831
+ treat_yr_2015 |  -.6061547   1.590439    -0.38   0.705    -3.800645    2.588335
+ treat_yr_2016 |  -.4032488    1.92633    -0.21   0.835    -4.272397      3.4659
+ treat_yr_2018 |  -.1526424   2.179918    -0.07   0.944    -4.531137    4.225853
+ treat_yr_2019 |  -1.840132   1.767534    -1.04   0.303    -5.390329    1.710064
+ treat_yr_2021 |  -.1557022   1.919864    -0.08   0.936    -4.011863    3.700458
+ treat_yr_2022 |  -1.115544   1.769425    -0.63   0.531    -4.669539    2.438452
+ treat_yr_2023 |   .3513401   1.427971     0.25   0.807    -2.516825    3.219505
+ treatment_ind |   .0506633   1.014318     0.05   0.960    -1.986654    2.087981
+     post_tcja |   .3909834   1.169121     0.33   0.739    -1.957265    2.739232
+          male |  -1.480935   .7719952    -1.92   0.061    -3.031533    .0696625
+           age |   .3144081   .0836958     3.76   0.000     .1463001    .4825162
+         age_2 |  -.2206897   .0917803    -2.40   0.020    -.4050358   -.0363436
+     full_time |   -4.58975   .6027524    -7.61   0.000    -5.800414   -3.379086
+male_full_time |  -.3281825   .8452701    -0.39   0.699    -2.025957    1.369592
+        educ_2 |          0  (omitted)
+        educ_3 |          0  (omitted)
+      hispanic |  -2.637139   .3871546    -6.81   0.000    -3.414762   -1.859516
+       married |   .6696979    .483225     1.39   0.172     -.300888    1.640284
+         white |   6.168184   2.411944     2.56   0.014     1.323652    11.01272
+         black |   3.222165    2.51097     1.28   0.205    -1.821267    8.265598
+        indian |   3.760184   2.933687     1.28   0.206      -2.1323    9.652669
+         asian |   1.556797   2.477156     0.63   0.533    -3.418717    6.532311
+       pacific |   1.158465   2.897482     0.40   0.691    -4.661299    6.978229
+   other_races |   7.914663   3.153102     2.51   0.015     1.581471    14.24786
+       retired |   4.592837   1.000536     4.59   0.000     2.583201    6.602473
+       hh_size |  -.1980485   .2560858    -0.77   0.443     -.712412     .316315
+    hh_numkids |    .128604   .3050077     0.42   0.675    -.4840221      .74123
+     ageychild |  -.0476284   .0383733    -1.24   0.220    -.1247035    .0294466
+               |
+          year |
+         2014  |  -1.047182   .8199616    -1.28   0.207    -2.694124    .5997594
+         2015  |   1.286741   1.154032     1.11   0.270      -1.0312    3.604681
+         2016  |   1.580416   1.380837     1.14   0.258    -1.193077     4.35391
+         2017  |   .4431243   1.139303     0.39   0.699    -1.845233    2.731482
+         2018  |   .2160051   1.315516     0.16   0.870    -2.426286    2.858296
+         2019  |   2.301154   1.239432     1.86   0.069    -.1883179    4.790626
+         2020  |   .6424031   1.130653     0.57   0.572    -1.628581    2.913387
+         2021  |   .9290867   1.219956     0.76   0.450    -1.521267     3.37944
+         2022  |   1.576071   1.176581     1.34   0.186    -.7871613    3.939303
+         2023  |          0  (omitted)
+               |
+      statefip |
+            2  |   13.53803   .1896456    71.39   0.000     13.15712    13.91895
+            4  |    2.88134   .1224321    23.53   0.000     2.635428    3.127252
+            5  |     .13099   .0818767     1.60   0.116    -.0334641    .2954441
+            6  |   4.717634   .1299264    36.31   0.000     4.456669    4.978599
+            8  |   3.439577   .1033975    33.27   0.000     3.231897    3.647257
+            9  |   3.307028   .1118828    29.56   0.000     3.082305    3.531752
+           10  |   .3969644   .1025345     3.87   0.000     .1910177     .602911
+           11  |   1.094451   .2369447     4.62   0.000     .6185338    1.570369
+           12  |   .9288022   .1102605     8.42   0.000     .7073374    1.150267
+           13  |   2.363415   .0948523    24.92   0.000     2.172899    2.553932
+           15  |   7.955659   .4258169    18.68   0.000      7.10038    8.810937
+           16  |   4.913554   .1083813    45.34   0.000     4.695863    5.131244
+           17  |   1.148788    .095355    12.05   0.000     .9572618    1.340314
+           18  |   3.298182   .0924339    35.68   0.000     3.112523    3.483841
+           19  |   2.596407   .1209061    21.47   0.000      2.35356    2.839254
+           20  |   1.667901   .0949434    17.57   0.000     1.477202      1.8586
+           21  |   1.866509   .0793239    23.53   0.000     1.707182    2.025835
+           22  |   3.006357   .0808874    37.17   0.000      2.84389    3.168824
+           23  |    8.27552    .147911    55.95   0.000     7.978432    8.572608
+           24  |   2.302044   .1064628    21.62   0.000     2.088207    2.515881
+           25  |   3.421101   .1025579    33.36   0.000     3.215108    3.627095
+           26  |   3.677487   .0898833    40.91   0.000     3.496951    3.858023
+           27  |   3.056558   .1036336    29.49   0.000     2.848404    3.264712
+           28  |  -3.151897   .1029548   -30.61   0.000    -3.358687   -2.945106
+           29  |  -.3752675   .0876179    -4.28   0.000    -.5512534   -.1992817
+           30  |   1.354396   .1275809    10.62   0.000     1.098142     1.61065
+           31  |   .8558417    .125464     6.82   0.000     .6038399    1.107843
+           32  |   4.052551   .1333774    30.38   0.000     3.784654    4.320447
+           33  |  -3.122542    .136177   -22.93   0.000    -3.396062   -2.849023
+           34  |   .9233685   .1070098     8.63   0.000     .7084331    1.138304
+           35  |   2.592986   .1617229    16.03   0.000     2.268156    2.917816
+           36  |   3.496137   .0869063    40.23   0.000      3.32158    3.670693
+           37  |   1.054351   .0705689    14.94   0.000     .9126088    1.196092
+           38  |   1.162628   .1725712     6.74   0.000     .8160084    1.509247
+           39  |   1.004714   .0943986    10.64   0.000     .8151087    1.194319
+           40  |    3.17347   .1432727    22.15   0.000     2.885698    3.461242
+           41  |   2.106162   .0950649    22.15   0.000     1.915218    2.297105
+           42  |   1.378967   .0898794    15.34   0.000     1.198439    1.559495
+           44  |  -.3647728    .126597    -2.88   0.006    -.6190503   -.1104953
+           45  |   .8571549   .0606808    14.13   0.000     .7352738     .979036
+           46  |  -2.133967   .1766686   -12.08   0.000    -2.488817   -1.779118
+           47  |  -.2104153    .053604    -3.93   0.000     -.318082   -.1027485
+           48  |   2.317798   .1201539    19.29   0.000     2.076462    2.559135
+           49  |   2.534613   .1539719    16.46   0.000     2.225351    2.843874
+           50  |    7.32037   .1731518    42.28   0.000     6.972584    7.668155
+           51  |    1.47681   .0706072    20.92   0.000     1.334992    1.618629
+           53  |   3.854591   .1074951    35.86   0.000      3.63868    4.070501
+           54  |   6.456442   .1506002    42.87   0.000     6.153953    6.758932
+           55  |   1.459997   .0982079    14.87   0.000      1.26274    1.657253
+           56  |  -1.010764   .2390516    -4.23   0.000    -1.490913   -.5306145
+               |
+         _cons |  -4.471351   2.769973    -1.61   0.113    -10.03501    1.092304
+--------------------------------------------------------------------------------
+
+. test treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016
+
+ ( 1)  treat_yr_2013 = 0
+ ( 2)  treat_yr_2014 = 0
+ ( 3)  treat_yr_2015 = 0
+ ( 4)  treat_yr_2016 = 0
+
+       F(  4,    50) =    0.62
+            Prob > F =    0.6486
+
+. di "Joint pre-trend test, COLLEGE-EDUCATED subgroup (p-value above; want p > 0.10)"
+Joint pre-trend test, COLLEGE-EDUCATED subgroup (p-value above; want p > 0.10)
+
+. outreg2 using "Results/Table10_Subgroup_EventStudy.xls", ///
+>     ctitle("College+ : Event Study") ///
+>     keep(treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016 ///
+>          treat_yr_2018 treat_yr_2019 treat_yr_2021 treat_yr_2022 treat_yr_2023) ///
+>     addtext("Subgroup","College-educated") bdec(3) se replace
+Results/Table10_Subgroup_EventStudy.xls
+dir : seeout
+
+. coefplot, ///
+>     keep(treat_yr_*) vertical ///
+>     rename(treat_yr_2013 = "2013" treat_yr_2014 = "2014" treat_yr_2015 = "2015" ///
+>            treat_yr_2016 = "2016" treat_yr_2018 = "2018" treat_yr_2019 = "2019" ///
+>            treat_yr_2021 = "2021" treat_yr_2022 = "2022" treat_yr_2023 = "2023") ///
+>     ciopts(recast(rcap) lcolor(gs8) lwidth(medium)) ///
+>     mcolor("26 71 111") msymbol(O) msize(medlarge) ///
+>     yline(0, lpattern(solid) lcolor(black) lwidth(thin)) ///
+>     xline(4.5, lpattern(dash) lcolor(cranberry) lwidth(medthick)) ///
+>     title("Event Study: College-Educated Subgroup", size(medium)) ///
+>     subtitle("Treatment x Year coefficients (reference year: 2017)", size(small)) ///
+>     ytitle("Treatment x Year coefficient (minutes/day)", size(small)) ///
+>     xtitle("Year", size(small)) ///
+>     ylabel(, angle(0) format(%5.1f)) xlabel(, angle(45)) legend(off) ///
+>     note("Sample: College-educated only. Reference year: 2017. 2020 omitted (COVID-19).", size(vsmall)) ///
+>     graphregion(color(white) margin(medium)) plotregion(margin(medium)) scheme(s2color)
+
+. graph export "Results/Figure5_EventStudy_CollegePlus.png", replace width(2400)
+file Results/Figure5_EventStudy_CollegePlus.png saved as PNG format
+
+. restore
+
+. 
+. *--- High-SALT states only ---
+. preserve
+
+. keep if high_salt_state == 1
+(64,690 observations deleted)
+
+. levelsof year, local(years)
+2013 2014 2015 2016 2017 2018 2019 2020 2021 2022 2023
+
+. foreach yr of local years {
+  2.     generate treat_yr_`yr' = treatment_ind * (year == `yr')
+  3. }
+
+. drop treat_yr_2017
+
+. capture drop treat_yr_2020
+
+. reg financial treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016 ///
+>     treat_yr_2018 treat_yr_2019 treat_yr_2021 treat_yr_2022 treat_yr_2023 ///
+>     treatment_ind post_tcja $controls i.year i.statefip ///
+>     [pw = wt06], robust cluster(statefip)
+(sum of wgt is 235,272,490,644.2)
+note: 14.famincome omitted because of collinearity.
+note: 2023.year omitted because of collinearity.
+
+Linear regression                               Number of obs     =     23,089
+                                                F(8, 9)           =          .
+                                                Prob > F          =          .
+                                                R-squared         =     0.0236
+                                                Root MSE          =     35.811
+
+                                (Std. err. adjusted for 10 clusters in statefip)
+--------------------------------------------------------------------------------
+               |               Robust
+     financial | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+---------------+----------------------------------------------------------------
+ treat_yr_2013 |    3.78686   1.827542     2.07   0.068     -.347326    7.921047
+ treat_yr_2014 |   2.753449   .9923578     2.77   0.022     .5085796    4.998318
+ treat_yr_2015 |   2.149367   1.006718     2.14   0.062     -.127987    4.426722
+ treat_yr_2016 |    3.86535   1.732321     2.23   0.053    -.0534323    7.784132
+ treat_yr_2018 |   4.488152   3.318018     1.35   0.209    -3.017726    11.99403
+ treat_yr_2019 |   1.639319   1.157397     1.42   0.190    -.9788943    4.257533
+ treat_yr_2021 |   3.985686   2.139875     1.86   0.095    -.8550474     8.82642
+ treat_yr_2022 |  -.1128427   1.845118    -0.06   0.953    -4.286789    4.061104
+ treat_yr_2023 |   3.161128   .9902608     3.19   0.011     .9210022    5.401253
+ treatment_ind |   .2305934   1.399705     0.16   0.873     -2.93576    3.396946
+     post_tcja |  -.2867641   1.147615    -0.25   0.808     -2.88285    2.309322
+          male |  -2.023504   .9949881    -2.03   0.073    -4.274323    .2273157
+           age |   .1690869   .0752886     2.25   0.051    -.0012276    .3394015
+         age_2 |  -.0669094   .0930498    -0.72   0.490    -.2774027    .1435839
+     full_time |  -4.449031   .6167747    -7.21   0.000    -5.844272    -3.05379
+male_full_time |   1.136664    1.03851     1.09   0.302    -1.212608    3.485936
+        educ_2 |   1.636881    .885328     1.85   0.098    -.3658703    3.639632
+        educ_3 |   5.254745   .7348341     7.15   0.000     3.592435    6.917055
+      hispanic |  -1.367554   .4436245    -3.08   0.013    -2.371103   -.3640061
+       married |  -.0269394   .6806858    -0.04   0.969    -1.566758    1.512879
+         white |   4.844257   3.520674     1.38   0.202     -3.12006    12.80857
+         black |   2.756353   3.929498     0.70   0.501    -6.132789     11.6455
+        indian |   .2840482   3.619815     0.08   0.939    -7.904542    8.472639
+         asian |   .4482789   3.266973     0.14   0.894    -6.942128    7.838686
+       pacific |  -1.935999   2.613392    -0.74   0.478    -7.847904    3.975905
+   other_races |   7.644242   3.818973     2.00   0.076    -.9948739    16.28336
+       retired |   3.969663   1.301914     3.05   0.014     1.024529    6.914796
+       hh_size |  -.7219118   .1127707    -6.40   0.000    -.9770169   -.4668068
+    hh_numkids |   .6204802   .1917568     3.24   0.010     .1866963    1.054264
+     ageychild |   .0195259   .0488508     0.40   0.699    -.0909822     .130034
+               |
+     famincome |
+            2  |  -.0861414   3.065534    -0.03   0.978    -7.020862    6.848579
+            3  |  -1.599949   .7199406    -2.22   0.053    -3.228568    .0286693
+            4  |  -2.762229   1.640878    -1.68   0.127    -6.474153     .949694
+            5  |   1.948376   2.729262     0.71   0.493    -4.225643    8.122395
+            6  |  -2.485386   2.096948    -1.19   0.266    -7.229013    2.258241
+            7  |  -2.559175   1.517478    -1.69   0.126     -5.99195    .8735994
+            8  |   .3965273   2.055169     0.19   0.851    -4.252587    5.045642
+            9  |   1.955459   1.891643     1.03   0.328    -2.323734    6.234653
+           10  |  -.5287825   2.035697    -0.26   0.801     -5.13385    4.076285
+           11  |   .7590427   1.732804     0.44   0.672    -3.160831    4.678917
+           12  |  -1.862276   1.069378    -1.74   0.116    -4.281377    .5568247
+           13  |  -1.588241    .780633    -2.03   0.072    -3.354156    .1776732
+           14  |          0  (omitted)
+           15  |   1.769688   1.583655     1.12   0.293    -1.812789    5.352165
+           16  |   3.413396   1.778873     1.92   0.087    -.6106937    7.437487
+               |
+          year |
+         2014  |  -.7121259    .723785    -0.98   0.351    -2.349441    .9251895
+         2015  |   .9479725   1.239745     0.76   0.464    -1.856525     3.75247
+         2016  |    1.31233    1.65779     0.79   0.449    -2.437853    5.062512
+         2017  |   .0815462   1.399806     0.06   0.955    -3.085036    3.248128
+         2018  |   .8657493    1.06629     0.81   0.438    -1.546366    3.277864
+         2019  |     1.8138   1.044963     1.74   0.117    -.5500701    4.177671
+         2020  |   .1625508   .8563068     0.19   0.854     -1.77455    2.099651
+         2021  |  -.6689486   .8510709    -0.79   0.452    -2.594205    1.256308
+         2022  |   1.648314   2.600261     0.63   0.542    -4.233884    7.530513
+         2023  |          0  (omitted)
+               |
+      statefip |
+            9  |  -.6635294   .2286049    -2.90   0.018     -1.18067   -.1463893
+           11  |  -3.837053   .4078203    -9.41   0.000    -4.759607   -2.914499
+           15  |   2.029273   .5063723     4.01   0.003     .8837796    3.174767
+           24  |  -2.357701   .2814534    -8.38   0.000    -2.994393   -1.721009
+           25  |  -1.789235   .1976316    -9.05   0.000    -2.236308   -1.342161
+           33  |  -3.511115   .2833257   -12.39   0.000    -4.152042   -2.870188
+           34  |   -3.58064    .183577   -19.50   0.000     -3.99592    -3.16536
+           36  |  -1.441496   .1928264    -7.48   0.000      -1.8777   -1.005293
+           51  |  -1.714903    .229109    -7.49   0.000    -2.233184   -1.196622
+               |
+         _cons |  -1.147457   3.861798    -0.30   0.773     -9.88345    7.588536
+--------------------------------------------------------------------------------
+
+. test treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016
+
+ ( 1)  treat_yr_2013 = 0
+ ( 2)  treat_yr_2014 = 0
+ ( 3)  treat_yr_2015 = 0
+ ( 4)  treat_yr_2016 = 0
+
+       F(  4,     9) =    6.29
+            Prob > F =    0.0107
+
+. di "Joint pre-trend test, HIGH-SALT STATES subgroup (p-value above; want p > 0.10)"
+Joint pre-trend test, HIGH-SALT STATES subgroup (p-value above; want p > 0.10)
+
+. outreg2 using "Results/Table10_Subgroup_EventStudy.xls", ///
+>     ctitle("High-SALT : Event Study") ///
+>     keep(treat_yr_2013 treat_yr_2014 treat_yr_2015 treat_yr_2016 ///
+>          treat_yr_2018 treat_yr_2019 treat_yr_2021 treat_yr_2022 treat_yr_2023) ///
+>     addtext("Subgroup","High-SALT states") bdec(3) se append
+Results/Table10_Subgroup_EventStudy.xls
+dir : seeout
+
+. coefplot, ///
+>     keep(treat_yr_*) vertical ///
+>     rename(treat_yr_2013 = "2013" treat_yr_2014 = "2014" treat_yr_2015 = "2015" ///
+>            treat_yr_2016 = "2016" treat_yr_2018 = "2018" treat_yr_2019 = "2019" ///
+>            treat_yr_2021 = "2021" treat_yr_2022 = "2022" treat_yr_2023 = "2023") ///
+>     ciopts(recast(rcap) lcolor(gs8) lwidth(medium)) ///
+>     mcolor("26 71 111") msymbol(O) msize(medlarge) ///
+>     yline(0, lpattern(solid) lcolor(black) lwidth(thin)) ///
+>     xline(4.5, lpattern(dash) lcolor(cranberry) lwidth(medthick)) ///
+>     title("Event Study: High-SALT States Subgroup", size(medium)) ///
+>     subtitle("Treatment x Year coefficients (reference year: 2017)", size(small)) ///
+>     ytitle("Treatment x Year coefficient (minutes/day)", size(small)) ///
+>     xtitle("Year", size(small)) ///
+>     ylabel(, angle(0) format(%5.1f)) xlabel(, angle(45)) legend(off) ///
+>     note("Sample: High-SALT states only (top quintile pre-TCJA itemization). Reference year: 2017. 2020 omitted.",
+>  size(vsmall)) ///
+>     graphregion(color(white) margin(medium)) plotregion(margin(medium)) scheme(s2color)
+
+. graph export "Results/Figure6_EventStudy_HighSALT.png", replace width(2400)
+file Results/Figure6_EventStudy_HighSALT.png saved as PNG format
+
+. restore
 
 . 
 . 
@@ -5009,6 +7846,186 @@ dir : seeout
 . 
 . 
 . ********************************************************************************
+. ** PART VIII-B [NEW] - MAGNITUDE PLAUSIBILITY CHECK & MINIMUM DETECTABLE EFFECT
+. ********************************************************************************
+. **  Reviewer #1 (pt.4): asks the authors to confront the magnitude of the
+. **  estimates against outside benchmarks (IRS Tax Burden Survey ~13h/year).
+. **  Reviewer #2: asks for an explicit statistical-power discussion instead
+. **  of calling the null "precise" based only on % of the control mean.
+. **  This block computes both diagnostics from the data actually used in the
+. **  regressions, rather than the reviewer's own back-of-envelope numbers.
+. ********************************************************************************
+. 
+. use "Data/TCJA_Financial_Time.dta", clear
+
+. 
+. *--- (a) Minimum detectable effect (MDE), main DiD, 80% power / 5% size ---
+. *   Standard formula: MDE = (z_{alpha/2} + z_{power}) * SE(beta)
+. qui reg financial did_ind treatment_ind post_tcja $controls ///
+>     i.year i.statefip [pw = wt06], robust cluster(statefip)
+
+. local se_did = _se[did_ind]
+
+. local mde = (1.96 + 0.84) * `se_did'
+
+. qui sum financial [aw = wt06] if control_group == 1 & post_tcja == 0
+
+. local premean = r(mean)
+
+. di ""
+
+
+. di "=================================================================="
+==================================================================
+
+. di "  MINIMUM DETECTABLE EFFECT - main DiD (80% power, 5% size)"
+  MINIMUM DETECTABLE EFFECT - main DiD (80% power, 5% size)
+
+. di "=================================================================="
+==================================================================
+
+. di "  SE(did_ind)                          = " %6.3f `se_did' " min/day"
+  SE(did_ind)                          =  0.495 min/day
+
+. di "  MDE                                  = " %6.3f `mde' " min/day"
+  MDE                                  =  1.387 min/day
+
+. di "  Pre-period control-group mean        = " %6.3f `premean' " min/day"
+  Pre-period control-group mean        =  7.056 min/day
+
+. di "  MDE as % of pre-period control mean  = " %5.1f (`mde'/`premean')*100 "%"
+  MDE as % of pre-period control mean  =  19.7%
+
+. di "  --> report this alongside the point estimate instead of relying on"
+  --> report this alongside the point estimate instead of relying on
+
+. di "      '% of control mean' alone to argue the null is 'precise' (Rev#2)."
+      '% of control mean' alone to argue the null is 'precise' (Rev#2).
+
+. di "=================================================================="
+==================================================================
+
+. di ""
+
+
+. 
+. *--- (b) Implied ATT on switchers, college-educated subgroup ---
+. *   Attempts a data-driven itemization-decline gap using delta_1718 (state
+. *   pp change in itemization 2017->2018, computed in Sample_Creation_TCJA.do
+. *   STEP 4), then falls back to Reviewer #1's own ~30pp assumption
+. *   (from Tax Foundation 2019 figures) if the state-level proxy turns out
+. *   to be too close to zero to use as a denominator. delta_1718 is a
+. *   STATE-level average across ALL income brackets, so unless treated and
+. *   control households are concentrated in very different states, it will
+. *   NOT differ much between the two groups by construction - it is not a
+. *   good proxy for the income-specific itemization decline this
+. *   calculation needs. A MIN_GAP safety threshold prevents a
+. *   near-zero-denominator blow-up (this happened in an earlier run: a
+. *   0.0pp gap produced a nonsensical -38,433 min/day implied ATT).
+. local MIN_GAP = 1  // pp; below this, treat the state-level proxy as uninformative
+
+. 
+. qui sum delta_1718 [aw = wt06] if treatment_ind == 1
+
+. local switch_treated = abs(r(mean))
+
+. qui sum delta_1718 [aw = wt06] if control_group == 1
+
+. local switch_control = abs(r(mean))
+
+. local switch_gap = `switch_treated' - `switch_control'
+
+. 
+. qui reg financial did_ind treatment_ind post_tcja $controls_noinc ///
+>     i.year i.statefip if educ_3 == 1 [pw = wt06], robust cluster(statefip)
+
+. local beta_college = _b[did_ind]
+
+. 
+. di "=================================================================="
+==================================================================
+
+. di "  MAGNITUDE PLAUSIBILITY CHECK - college-educated subgroup"
+  MAGNITUDE PLAUSIBILITY CHECK - college-educated subgroup
+
+. di "=================================================================="
+==================================================================
+
+. di "  Mean |delta_1718| (pp itemization decline), treated group  = " %5.2f `switch_treated'
+  Mean |delta_1718| (pp itemization decline), treated group  =  0.20
+
+. di "  Mean |delta_1718| (pp itemization decline), control group  = " %5.2f `switch_control'
+  Mean |delta_1718| (pp itemization decline), control group  =  0.20
+
+. di "  Implied itemization-decline GAP (treated - control), pp    = " %5.2f `switch_gap'
+  Implied itemization-decline GAP (treated - control), pp    =  0.00
+
+. di "  ITT coefficient, college-educated (did_ind)                = " %6.3f `beta_college' " min/day"
+  ITT coefficient, college-educated (did_ind)                = -1.355 min/day
+
+. if `switch_gap' > `MIN_GAP' {
+.     local att_college = `beta_college' / (`switch_gap'/100)
+.     local hrs_college = `att_college' * 365 / 60
+.     di "  Implied ATT on switchers (state-level proxy)                = " %7.1f `att_college' " min/day"
+.     di "  ... equivalent to                                            = " %6.1f `hrs_college' " hours/year"
+.     di "  BENCHMARK: IRS Tax Burden Survey ~= 13 hours/year for the"
+.     di "  average filer's ENTIRE return (Reviewer #1, point 4)."
+.     if abs(`hrs_college') > 13 {
+.         di "  FLAG: implied ATT exceeds the total-filing-time benchmark -"
+.         di "  discuss explicitly in the paper (compositional story, measurement"
+.         di "  error, or genuine outlier subgroup) rather than leaving it implicit."
+.     }
+. }
+
+. else {
+.     di "  NOTE: the state-level delta_1718 gap (" %4.2f `switch_gap' "pp) is below the"
+  NOTE: the state-level delta_1718 gap (0.00pp) is below the
+.     di "  " %2.0f `MIN_GAP' "pp threshold - as expected, since delta_1718 is a STATE"
+   1pp threshold - as expected, since delta_1718 is a STATE
+.     di "  average across ALL income brackets and cannot meaningfully separate"
+  average across ALL income brackets and cannot meaningfully separate
+.     di "  treated vs control households within the same state. Do NOT use it"
+  treated vs control households within the same state. Do NOT use it
+.     di "  to defend the college+ magnitude. Falling back to Reviewer #1's own"
+  to defend the college+ magnitude. Falling back to Reviewer #1's own
+.     di "  ~30pp assumption (Tax Foundation 2019) for a sensitivity calculation:"
+  ~30pp assumption (Tax Foundation 2019) for a sensitivity calculation:
+.     local att_college_fallback = `beta_college' / 0.30
+.     local hrs_college_fallback = `att_college_fallback' * 365 / 60
+.     di "  Implied ATT using an assumed 30pp gap                       = " %7.1f `att_college_fallback' " min/day"
+  Implied ATT using an assumed 30pp gap                       =    -4.5 min/day
+.     di "  ... equivalent to                                            = " %6.1f `hrs_college_fallback' " hours/ye
+> ar"
+  ... equivalent to                                            =  -27.5 hours/year
+.     di "  BENCHMARK: IRS Tax Burden Survey ~= 13 hours/year for the average filer."
+  BENCHMARK: IRS Tax Burden Survey ~= 13 hours/year for the average filer.
+.     if abs(`hrs_college_fallback') > 13 {
+.         di "  FLAG: even under the 30pp assumption, implied ATT exceeds the"
+  FLAG: even under the 30pp assumption, implied ATT exceeds the
+.         di "  13h/year benchmark - discuss explicitly in the paper rather than"
+  13h/year benchmark - discuss explicitly in the paper rather than
+.         di "  leaving it implicit (this is Reviewer #1's own point-4 finding,"
+  leaving it implicit (this is Reviewer #1's own point-4 finding,
+.         di "  confirmed on this data)."
+  confirmed on this data).
+.     }
+.     di "  For a real (non-fallback) number, compute the itemization-decline"
+  For a real (non-fallback) number, compute the itemization-decline
+.     di "  gap from IRS SOI Historic Table 2 BY INCOME BRACKET (not by state) -"
+  gap from IRS SOI Historic Table 2 BY INCOME BRACKET (not by state) -
+.     di "  the state-level file merged here cannot answer this question."
+  the state-level file merged here cannot answer this question.
+. }
+
+. di "=================================================================="
+==================================================================
+
+. di ""
+
+
+. 
+. 
+. ********************************************************************************
 . ** PART IX - FIGURES
 . ********************************************************************************
 . 
@@ -5111,26 +8128,32 @@ file Results/Figure4_Gender_Trends.png saved as PNG format
 . di "  Key tables:"
   Key tables:
 
-. di "    Table2_Main_DiD.xls       - Main DiD estimates (H1)"
-    Table2_Main_DiD.xls       - Main DiD estimates (H1)
+. di "    Table2_Main_DiD.xls        - Main DiD estimates (H1); cols (7)-(8) NEW"
+    Table2_Main_DiD.xls        - Main DiD estimates (H1); cols (7)-(8) NEW
 
-. di "    Table3_EventStudy.xls     - Parallel trends test (-5/+5 window)"
-    Table3_EventStudy.xls     - Parallel trends test (-5/+5 window)
+. di "    Table3_EventStudy.xls      - Parallel trends test (-5/+5 window)"
+    Table3_EventStudy.xls      - Parallel trends test (-5/+5 window)
 
-. di "    Table4_Gender.xls         - Gender heterogeneity (H3)"
-    Table4_Gender.xls         - Gender heterogeneity (H3)
+. di "    Table9_TaxSeason_TripleDiD.xls - [NEW] Treat x Post x Tax-season"
+    Table9_TaxSeason_TripleDiD.xls - [NEW] Treat x Post x Tax-season
 
-. di "    Table5_WellBeing.xls      - Well-being outcomes (H2)"
-    Table5_WellBeing.xls      - Well-being outcomes (H2)
+. di "    Table4_Gender.xls          - Gender heterogeneity (H3)"
+    Table4_Gender.xls          - Gender heterogeneity (H3)
 
-. di "    Table6_Heterogeneity.xls  - Education, SALT, gender subgroups"
-    Table6_Heterogeneity.xls  - Education, SALT, gender subgroups
+. di "    Table10_Subgroup_EventStudy.xls - [NEW] Pre-trends: college+, high-SALT"
+    Table10_Subgroup_EventStudy.xls - [NEW] Pre-trends: college+, high-SALT
 
-. di "    Table7_Continuous_DiD.xls - State-level treatment intensity"
-    Table7_Continuous_DiD.xls - State-level treatment intensity
+. di "    Table5_WellBeing.xls       - Well-being outcomes (H2)"
+    Table5_WellBeing.xls       - Well-being outcomes (H2)
 
-. di "    Table8_Robustness.xls     - Robustness checks"
-    Table8_Robustness.xls     - Robustness checks
+. di "    Table6_Heterogeneity.xls   - Education, SALT, gender subgroups"
+    Table6_Heterogeneity.xls   - Education, SALT, gender subgroups
+
+. di "    Table7_Continuous_DiD.xls  - State-level treatment intensity"
+    Table7_Continuous_DiD.xls  - State-level treatment intensity
+
+. di "    Table8_Robustness.xls      - Robustness checks"
+    Table8_Robustness.xls      - Robustness checks
 
 . di ""
 
@@ -5138,25 +8161,51 @@ file Results/Figure4_Gender_Trends.png saved as PNG format
 . di "  Figures (PNG, 2400px wide):"
   Figures (PNG, 2400px wide):
 
-. di "    Figure1_EventStudy.png    - Main event study (vertical, Δ minutes)"
-    Figure1_EventStudy.png    - Main event study (vertical, Δ minutes)
+. di "    Figure1_EventStudy.png     - Main event study (vertical, delta minutes)"
+    Figure1_EventStudy.png     - Main event study (vertical, delta minutes)
 
-. di "    Figure2_EventStudy_*.png  - Event study by gender (Men, Women)"
-    Figure2_EventStudy_*.png  - Event study by gender (Men, Women)
+. di "    Figure2_EventStudy_*.png   - Event study by gender (Men, Women)"
+    Figure2_EventStudy_*.png   - Event study by gender (Men, Women)
 
-. di "    Figure3_FinancialTime_Trends.png - Mean trends by treatment group"
-    Figure3_FinancialTime_Trends.png - Mean trends by treatment group
+. di "    Figure5_EventStudy_CollegePlus.png - [NEW] Event study, college+"
+    Figure5_EventStudy_CollegePlus.png - [NEW] Event study, college+
 
-. di "    Figure4_Gender_Trends.png        - Mean trends by gender x treatment"
-    Figure4_Gender_Trends.png        - Mean trends by gender x treatment
+. di "    Figure6_EventStudy_HighSALT.png    - [NEW] Event study, high-SALT states"
+    Figure6_EventStudy_HighSALT.png    - [NEW] Event study, high-SALT states
+
+. di "    Figure3_FinancialTime_Trends.png   - Mean trends by treatment group"
+    Figure3_FinancialTime_Trends.png   - Mean trends by treatment group
+
+. di "    Figure4_Gender_Trends.png          - Mean trends by gender x treatment"
+    Figure4_Gender_Trends.png          - Mean trends by gender x treatment
+
+. di ""
+
+
+. di "  Also check the Stata log for:"
+  Also check the Stata log for:
+
+. di "    - the 'transition zone' sample diagnostic (from Sample_Creation_TCJA.do)"
+    - the 'transition zone' sample diagnostic (from Sample_Creation_TCJA.do)
+
+. di "    - the minimum detectable effect and magnitude plausibility check"
+    - the minimum detectable effect and magnitude plausibility check
+
+. di "      (Part VIII-B above)"
+      (Part VIII-B above)
 
 . di "=================================================================="
 ==================================================================
 
 . 
+. *log close
+. 
+end of do-file
+
+. 
 . log close
       name:  <unnamed>
-       log:  C:\data\GMX_Tax_Changes\Results/All_Results.log
+       log:  C:\data\GM_Tax_Changes\GM_Tax_Changes.log
   log type:  text
- closed on:  14 May 2026, 12:36:34
+ closed on:  17 Aug 2026, 10:33:57
 --------------------------------------------------------------------------------------------------------------------

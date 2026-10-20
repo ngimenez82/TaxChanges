@@ -2,14 +2,32 @@
 
 ## TCJA Financial Complexity and Time Use
 
-Data construction and empirical analysis code for the paper:
+Replication package (code and results) for the paper:
 
 **"Did Tax Simplification Reduce Household Financial Management Burden? Evidence from the Tax Cuts and Jobs Act"**
-José Ignacio Giménez-Nadal and José Alberto Molina
+José Ignacio Giménez-Nadal and José Alberto Molina (IEDIS, University of Zaragoza)
+
+📄 **Paper (PDF):** [`Paper/Tax_Reform_Financial_Behavior_JBEEc.pdf`](Paper/Tax_Reform_Financial_Behavior_JBEEc.pdf)
 
 ### Abstract
 
 We estimate the effect of the 2017 Tax Cuts and Jobs Act (TCJA) on household time devoted to financial management, using the American Time Use Survey (ATUS), 2013–2023. Comparing households earning $50,000–$100,000, likely to stop itemizing after the reform, against a control group earning below $35,000, we find no significant average effect (+0.53 min/day, SE = 0.56). The null survives every check a referee could reasonably demand: a narrower tax- and insurance-specific outcome, a triple-difference test isolating tax-filing season, a pre-COVID sample, and a power analysis detecting effects a fifth the control-group mean. Event studies confirm parallel pre-reform trends. One subgroup effect survives scrutiny: college-educated households show a significant reduction (-1.36 min/day, p = 0.04) passing its own pre-trends test, though the implied effect on likely switchers exceeds IRS compliance-cost benchmarks, a tension we discuss openly. A previously reported high-SALT-state effect fails its pre-trends test and is not treated as causal. Using the ATUS Well-Being Module, we find a decline in happiness during financial management after the reform; since the only post-reform wave (2021) is confounded with pandemic disruption, we treat this as suggestive, not causal. Overall, tax simplification produced, at most, modest time savings, concentrated among the most financially sophisticated households.
+
+## Repository Structure
+
+```
+TaxChanges/
+├── GM_Tax_Changes.do          Master do file: runs the whole analysis
+├── GM_Tax_Changes.log         Full Stata log of the last run of the master do file
+├── Dofiles/
+│   ├── Sample_Creation_TCJA.do   Builds the analysis samples
+│   └── Analysis_DiD_TCJA.do      Estimates all tables and figures
+├── Results/                   Tables (.xls / .txt), figures (.png), event-study coefficients
+├── Paper/                     PDF of the paper
+└── Data/                      Not distributed (see Data/README.md)
+```
+
+The data are **not included** in this repository. `Data/README.md` lists the files required and where to obtain them.
 
 ## Project Overview
 
@@ -152,7 +170,7 @@ Uses the ATUS Well-Being Module (WBM).
 
 **Final sample size:** N = 97,889 episodes (N = 1,576 for the financial-activity-only subsample)
 
-**Caveat.** The Well-Being Module was fielded only in 2012, 2013, and 2021, so its only post-reform wave (2021) is confounded with pandemic-era disruption. Well-being results are reported as suggestive, not causal.
+**Caveat.** The Well-Being Module was fielded only in 2010, 2012, 2013, and 2021, so its only post-reform wave (2021) is confounded with pandemic-era disruption. Well-being results are reported as suggestive, not causal.
 
 ## Empirical Specifications
 
@@ -235,31 +253,36 @@ Tax simplification produced, at most, modest average time savings in household f
 
 ## Output Files
 
+All output files are written to `Results/`. Summary statistics (Table 1) and every regression are also printed in `GM_Tax_Changes.log`.
+
 ### Main Tables
 
 | File | Description |
 |---|---|
-| `Table1_SumStats_TCJA.log` | Summary statistics |
-| `Table2_Main_DiD.xls` | Main DiD estimates (multiple comparison groups and samples) |
-| `Table3_EventStudy.xls` | Event-study coefficients, full sample |
-| `Table4_Gender.xls` | Gender heterogeneity analysis |
-| `Table5_WellBeing.xls` / `Table5_WellBeing_FinancialOnly.xls` | Well-being regressions (full and financial-activity-only) |
-| `Table6_Heterogeneity.xls` | Heterogeneity by education and SALT exposure |
-| `Table7_Continuous_DiD.xls` | Continuous state-treatment-intensity and triple-interaction DiD |
-| `Table8_Robustness.xls` | Robustness checks (placebo, sample exclusions, no-income-tax states, log outcome) |
-| `Table9_TaxSeason_TripleDiD.xls` | Tax-season triple-difference design |
-| `Table10_Subgroup_EventStudy.xls` | Pre-trends event studies for the college-educated and high-SALT subgroups |
+| `GM_Tax_Changes.log` | Summary statistics (Table 1) and full regression output |
+| `Results/Table2_Main_DiD.xls` | Main DiD estimates (multiple comparison groups and samples) |
+| `Results/Table3_EventStudy.xls` | Event-study coefficients, full sample |
+| `Results/Table4_Gender.xls` | Gender heterogeneity analysis |
+| `Results/Table5_WellBeing.xls` / `Results/Table5_WellBeing_FinancialOnly.xls` | Well-being regressions (full and financial-activity-only) |
+| `Results/Table6_Heterogeneity.xls` | Heterogeneity by education and SALT exposure |
+| `Results/Table7_Continuous_DiD.xls` | Continuous state-treatment-intensity and triple-interaction DiD |
+| `Results/Table8_Robustness.xls` | Robustness checks (placebo, sample exclusions, no-income-tax states, log outcome) |
+| `Results/Table9_TaxSeason_TripleDiD.xls` | Tax-season triple-difference design |
+| `Results/Table10_Subgroup_EventStudy.xls` | Pre-trends event studies for the college-educated and high-SALT subgroups |
+| `Results/EventStudy_coefs.dta` | Event-study coefficients used for Figure 1 |
+
+Each `.xls` table has a plain-text `.txt` copy with the same name.
 
 ### Figures
 
 | File | Description |
 |---|---|
-| `Figure1_EventStudy.png` | Main event-study coefficients |
-| `Figure2_EventStudy_Men.png` / `Figure2_EventStudy_Women.png` | Event study by gender |
-| `Figure3_FinancialTime_Trends.png` | Raw financial-management time trends |
-| `Figure4_Gender_Trends.png` | Raw trends by gender |
-| `Figure5_EventStudy_CollegePlus.png` | Pre-trends event study, college-educated subgroup |
-| `Figure6_EventStudy_HighSALT.png` | Pre-trends event study, high-SALT-state subgroup |
+| `Results/Figure1_EventStudy.png` | Main event-study coefficients |
+| `Results/Figure2_EventStudy_Men.png` / `Results/Figure2_EventStudy_Women.png` | Event study by gender |
+| `Results/Figure3_FinancialTime_Trends.png` | Raw financial-management time trends |
+| `Results/Figure4_Gender_Trends.png` | Raw trends by gender |
+| `Results/Figure5_EventStudy_CollegePlus.png` | Pre-trends event study, college-educated subgroup |
+| `Results/Figure6_EventStudy_HighSALT.png` | Pre-trends event study, high-SALT-state subgroup |
 
 ## Required Stata Packages
 
@@ -269,30 +292,32 @@ Install before running:
 ssc install outreg2
 ssc install coefplot
 ssc install estout
+ssc install parmest
 ```
 
 ## Replication Workflow
 
-**Step 1 — Create Samples**
+**Step 0 — Obtain the data.** Place `ATUS_Clean.dta` and `TCJA_State_Data_DiD.xlsx` in `Data/` (see `Data/README.md`).
+
+**Step 1 — Set the working directory.** Open `GM_Tax_Changes.do` and change the path at the top to the folder where you cloned this repository:
 
 ```
-do Dofiles/Sample_Creation_TCJA.do
+local path="C:\your\folder\TaxChanges"
+cd `path'
 ```
 
-This generates:
+**Step 2 — Run the master do file.**
 
 ```
-Data/TCJA_Financial_Time.dta
-Data/TCJA_Financial_WellBeing.dta
+do GM_Tax_Changes.do
 ```
 
-**Step 2 — Run Main Analysis**
+It runs, in order:
 
-```
-do Dofiles/Analysis_DiD_TCJA.do
-```
+1. `Dofiles/Sample_Creation_TCJA.do`, which creates `Data/TCJA_State_Treatment.dta`, `Data/TCJA_Financial_Time.dta` and `Data/TCJA_Financial_WellBeing.dta`;
+2. `Dofiles/Analysis_DiD_TCJA.do`, which produces all tables, figures, event studies (including the subgroup pre-trends tests), the tax-season triple-difference, robustness checks and heterogeneity analyses in `Results/`.
 
-This produces: regression tables, event-study estimates (including the subgroup pre-trends tests), the tax-season triple-difference results, figures, robustness checks, and heterogeneity analyses.
+The full output is saved in `GM_Tax_Changes.log`.
 
 ## Methodological Notes
 
@@ -307,6 +332,9 @@ This produces: regression tables, event-study estimates (including the subgroup 
 
 ```
 Giménez-Nadal, J.I., and J.A. Molina. "Did Tax Simplification Reduce Household
-Financial Management Burden? Evidence from the Tax Cuts and Jobs Act"
+Financial Management Burden? Evidence from the Tax Cuts and Jobs Act." Working paper.
 ```
 
+## Contact
+
+José Ignacio Giménez-Nadal, Department of Economic Analysis, University of Zaragoza — ngimenez@unizar.es
